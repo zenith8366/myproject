@@ -51,24 +51,41 @@
 
 ## 仓库结构
 myproject/
+
 ├── vibepet/ # 项目一：AI 编程助手物理终端
+
 │ ├── firmware/ # ESP32 固件
+
 │ │ ├── VibePet/
+
 │ │ │ └── VibePet.ino
+
 │ │ └── TFT_eSPI_User_Setup.h
+
 │ ├── pc/ # 电脑端 Python 程序
+
 │ │ ├── hook_client.py
+
 │ │ ├── bridge_daemon.py
+
 │ │ └── _smoke_test*.py
+
 │ ├── .claude/ # Claude Code Hook 配置
+
 │ └── README.md # 项目详细说明
 │
 ├── [下一个项目]/ # 每个项目一个独立目录
+
 │ ├── firmware/ 或 src/
+
 │ ├── docs/
+
 │ └── README.md
+
 │
+
 └── README.md # 本文件
+
 ## 开发环境
 
 不同项目用的工具链不一样，常见的有：
