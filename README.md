@@ -96,7 +96,6 @@ myproject/
 
 **目录命名**
 
-- 使用小写英文，单词间用连字符，例如 `smart-clock`、`ble-sensor-node`；
 - 避免空格和中文，避免与已有项目重名；
 - 每个项目一个顶层目录，不嵌套在其他项目里。
 
@@ -140,6 +139,7 @@ myproject/
 ## 联系
 
 - GitHub: [@zenith8366](https://github.com/zenith8366)
+- Email:lyh351608807@outlook.com or ericalaplce8@gmail.com
 - 有问题优先提 Issue，方便其他人也能看到答案。
 
 ---
