@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Arduino / arduino-cli 编译产物
+firmware/**/build/
+*.ino.bin
+*.ino.elf
+*.ino.map
+
+# PlatformIO（固件若改用 PlatformIO 构建，见设计文档 5.1）
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# 系统
+.DS_Store
+Thumbs.db
