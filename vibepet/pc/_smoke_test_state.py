@@ -12,7 +12,9 @@ import sys
 import threading
 import time
 
-sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+# type: ignore —— typeshed 把 sys.stdout 标注为 TextIO 协议（无 reconfigure），
+# 运行时实际是 TextIOWrapper，属类型存根局限。
+sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore
 
 PC_DIR = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.join(PC_DIR, "hook_client.py")

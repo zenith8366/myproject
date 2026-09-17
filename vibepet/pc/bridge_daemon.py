@@ -37,7 +37,10 @@ import uuid
 # 顺手让 `--help` 的中文说明也不乱码。
 for _stream in (sys.stdout, sys.stderr):
     try:
-        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        # typeshed 把 sys.stdout 标注成 TextIO 协议（协议里没有 reconfigure），
+        # 运行时实际是 TextIOWrapper，该方法一定存在 —— 属类型存根局限，
+        # 故 type: ignore；真遇到不支持的流对象由 except 兜底。
+        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore
     except Exception:
         pass
 
@@ -135,9 +138,13 @@ class BleTransport:
         return True
 
     async def send_line(self, text):
-        if not self.connected:
+        # 用局部变量而不是 self.connected 做前置检查：属性检查无法让类型检查器
+        # 窄化 self._client（BleakClient | None），会误报「不是 None 的属性」。
+        # 语义与 connected 完全一致，且检查与使用之间引用不会变。
+        client = self._client
+        if client is None or not client.is_connected:
             raise ConnectionError("BLE 未连接")
-        await self._client.write_gatt_char(NUS_RX_UUID, (text + "\n").encode("utf-8"))
+        await client.write_gatt_char(NUS_RX_UUID, (text + "\n").encode("utf-8"))
         debug(f"→ 设备: {text}")
 
     def _on_disconnect(self, client):
@@ -409,6 +416,9 @@ async def dispatch(bridge, req):
 
 
 async def handle_client(bridge, reader, writer):
+    # 兜底初值：except Exception 接不住 BaseException（如任务取消），
+    # 那条路径下 finally 里读未赋值的 resp 会抛 UnboundLocalError。
+    resp = {"error": "请求处理被中断"}
     try:
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=REQUEST_TIMEOUT)

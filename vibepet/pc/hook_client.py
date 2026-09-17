@@ -41,7 +41,10 @@ import sys
 # 字符会抛 UnicodeEncodeError。日志里一旦出现这类字符，整个 Hook 进程就会崩掉，
 # 而 Hook 崩溃等于审批链路中断。显式改为 UTF-8，与 Hook JSON 的编码保持一致。
 try:
-    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+    # typeshed 把 sys.stderr 标注成 TextIO 协议（协议里没有 reconfigure），
+    # 运行时实际是 TextIOWrapper，该方法一定存在 —— 属类型存根局限，
+    # 故 type: ignore；真遇到不支持的流对象由 except 兜底。
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore
 except Exception:
     pass
 

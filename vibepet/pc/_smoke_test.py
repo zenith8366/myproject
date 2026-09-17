@@ -9,7 +9,9 @@ import threading
 import time
 
 # 测试脚本自身也要用 UTF-8 输出，否则打印含替换字符的日志时会崩
-sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+# type: ignore —— typeshed 把 sys.stdout 标注为 TextIO 协议（无 reconfigure），
+# 运行时实际是 TextIOWrapper，属类型存根局限。
+sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore
 
 CLIENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hook_client.py")
 PORT = 8765
