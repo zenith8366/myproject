@@ -1,0 +1,157 @@
+/*
+ * 原神主题曲 (Genshin Impact Main Theme Song)
+ * 硬件：Arduino UNO + 无源蜂鸣器 (8号引脚)
+ * 功能：上电自动循环播放（单音主旋律简化版）
+ * 提示：无源蜂鸣器负极接GND，正极接8号引脚。
+ */
+
+// --- 引脚定义 ---
+const int BUZZER_PIN = 8;
+
+// --- 音符频率定义 (Hz) ---
+#define NOTE_D4  294
+#define NOTE_E4  330
+#define NOTE_FS4 370
+#define NOTE_G4  392
+#define NOTE_GS4 415 // 升G4
+#define NOTE_A4  440
+#define NOTE_AS4 466 // 降B4
+#define NOTE_B4  494
+#define NOTE_C5  523
+#define NOTE_CS5 554 // 升C5
+#define NOTE_D5  587
+#define NOTE_E5  659
+#define NOTE_FS5 740
+#define NOTE_G5  784
+#define NOTE_GS5 831 // 升G5 (#4)
+#define NOTE_A5  880
+#define NOTE_B5  988
+#define NOTE_C6  1046 // 降B调 (b7) 频率
+#define NOTE_CS6 1109
+#define NOTE_D6  1175
+#define NOTE_E6  1319
+#define NOTE_FS6 1480
+#define NOTE_G6  1568
+
+// --- 节拍设置 (BPM = 82) ---
+// 四分音符 = 60000/82 ≈ 732ms
+const int WHOLE_NOTE      = 2928; // 全音符
+const int HALF_NOTE       = 1464; // 二分音符
+const int DOTTED_QUARTER  = 1098; // 附点四分音符
+const int QUARTER_NOTE    = 732;  // 四分音符
+const int DOTTED_EIGHTH   = 549;  // 附点八分音符
+const int EIGHTH_NOTE     = 366;  // 八分音符
+const int SIXTEENTH_NOTE  = 183;  // 十六分音符
+const int REST            = 0;    // 休止符
+
+// --- 乐谱数据结构 ---
+struct Note {
+  int pitch;      // 频率
+  int duration;   // 持续毫秒数
+};
+
+// --- 原神主题曲主旋律提取 (1=D, 3/4拍) ---
+// 注：已提取高音谱表主旋律，伴奏声部未包含。部分复杂连音为听感清晰做了简化。
+Note melody[] = {
+  // 第1-4小节 (前3小节休止)
+  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE},
+  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE},
+  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE},
+  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {NOTE_D6, QUARTER_NOTE},
+  
+  // 第5-8小节
+  {NOTE_G5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE},
+  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_CS6, SIXTEENTH_NOTE},
+  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
+  {NOTE_A5, QUARTER_NOTE}, {NOTE_E5, QUARTER_NOTE},
+  
+  // 第9-12小节
+  {NOTE_G5, QUARTER_NOTE}, {NOTE_G5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
+  {NOTE_FS5, QUARTER_NOTE}, {NOTE_G4, EIGHTH_NOTE}, {NOTE_E4, EIGHTH_NOTE},
+  {NOTE_D6, QUARTER_NOTE}, {NOTE_E6, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE},
+  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {NOTE_D6, QUARTER_NOTE},
+
+  // 第13-16小节 (重复第5-8小节)
+  {NOTE_G5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE},
+  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_CS6, SIXTEENTH_NOTE},
+  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
+  {NOTE_A5, QUARTER_NOTE}, {NOTE_E5, QUARTER_NOTE},
+
+  // 第17-20小节
+  {NOTE_G5, QUARTER_NOTE}, {NOTE_G5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
+  {NOTE_FS5, QUARTER_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, EIGHTH_NOTE},
+  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE},
+  {NOTE_E5, QUARTER_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_CS6, EIGHTH_NOTE},
+
+  // 第21-24小节
+  {NOTE_D6, QUARTER_NOTE}, {NOTE_D6, EIGHTH_NOTE}, {NOTE_E6, EIGHTH_NOTE},
+  {NOTE_CS6, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
+  {NOTE_A5, QUARTER_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_FS5, EIGHTH_NOTE},
+  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_B5, SIXTEENTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
+
+  // 第25-28小节
+  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
+  {NOTE_FS5, QUARTER_NOTE}, {NOTE_G4, EIGHTH_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, QUARTER_NOTE},
+  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE},
+  {NOTE_E5, QUARTER_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_CS6, EIGHTH_NOTE},
+
+  // 第29-32小节
+  {NOTE_D6, QUARTER_NOTE}, {NOTE_D6, EIGHTH_NOTE}, {NOTE_E6, EIGHTH_NOTE},
+  {NOTE_CS6, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
+  {NOTE_A5, QUARTER_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
+  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_B5, SIXTEENTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
+
+  // 第33-36小节
+  {NOTE_B5, DOTTED_QUARTER}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
+  {NOTE_FS5, QUARTER_NOTE}, {NOTE_G4, EIGHTH_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, QUARTER_NOTE},
+  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE},
+  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {NOTE_D6, QUARTER_NOTE},
+
+  // 第37-40小节
+  {NOTE_G5, QUARTER_NOTE}, {NOTE_G5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
+  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_CS6, SIXTEENTH_NOTE},
+  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
+  {NOTE_A5, QUARTER_NOTE}, {NOTE_E5, QUARTER_NOTE},
+
+  // 第41-44小节
+  {NOTE_G5, QUARTER_NOTE}, {NOTE_G5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
+  {NOTE_FS5, QUARTER_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, EIGHTH_NOTE},
+  {NOTE_E5, QUARTER_NOTE}, {NOTE_B5, QUARTER_NOTE}, {REST, QUARTER_NOTE}, 
+  {NOTE_B5, HALF_NOTE}, {NOTE_D6, QUARTER_NOTE},
+
+  // 第45-48小节
+  {NOTE_G5, EIGHTH_NOTE}, {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE},
+  {NOTE_CS6, QUARTER_NOTE}, {NOTE_E6, EIGHTH_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_B5, SIXTEENTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
+  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
+  {NOTE_A5, QUARTER_NOTE}, {NOTE_CS6, EIGHTH_NOTE}, {NOTE_E6, QUARTER_NOTE}, {REST, QUARTER_NOTE},
+
+  // 第49-52小节 (收尾)
+  {NOTE_G5, EIGHTH_NOTE}, {NOTE_E5, EIGHTH_NOTE}, {NOTE_G5, QUARTER_NOTE}, {NOTE_A5, QUARTER_NOTE},
+  {NOTE_FS5, QUARTER_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, EIGHTH_NOTE},
+  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE},
+  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE}
+};
+
+int melodyLength = sizeof(melody) / sizeof(melody[0]);
+
+void setup() {
+  pinMode(BUZZER_PIN, OUTPUT);
+}
+
+void loop() {
+  // 循环播放整首曲子
+  for (int i = 0; i < melodyLength; i++) {
+    if (melody[i].pitch == REST || melody[i].duration == 0) {
+      // 休止符：不发声，只等待
+      delay(melody[i].duration);
+    } else {
+      // 播放音符，为了区分连续相同的音符，实际发声时间略短于节拍，留出间隔
+      int playDuration = melody[i].duration * 0.9; 
+      tone(BUZZER_PIN, melody[i].pitch, playDuration);
+      delay(melody[i].duration); // 等待整个节拍的时间
+    }
+  }
+  
+  // 播完一遍后，停顿2秒，准备下一遍循环
+  delay(2000);
+}
