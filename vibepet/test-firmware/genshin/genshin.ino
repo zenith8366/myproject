@@ -1,157 +1,318 @@
 /*
- * 原神主题曲 (Genshin Impact Main Theme Song)
- * 硬件：Arduino UNO + 无源蜂鸣器 (8号引脚)
- * 功能：上电自动循环播放（单音主旋律简化版）
- * 提示：无源蜂鸣器负极接GND，正极接8号引脚。
- */
+  Genshin Impact Main Theme - 单音蜂鸣器版
+  来源：用户上传的三页《原神主题曲》简谱
 
-// --- 引脚定义 ---
-const int BUZZER_PIN = 8;
+  简谱信息：
+    1 = D
+    3/4
+    ♩ = 82
 
-// --- 音符频率定义 (Hz) ---
-#define NOTE_D4  294
-#define NOTE_E4  330
-#define NOTE_FS4 370
-#define NOTE_G4  392
-#define NOTE_GS4 415 // 升G4
-#define NOTE_A4  440
-#define NOTE_AS4 466 // 降B4
-#define NOTE_B4  494
-#define NOTE_C5  523
-#define NOTE_CS5 554 // 升C5
-#define NOTE_D5  587
-#define NOTE_E5  659
-#define NOTE_FS5 740
-#define NOTE_G5  784
-#define NOTE_GS5 831 // 升G5 (#4)
-#define NOTE_A5  880
-#define NOTE_B5  988
-#define NOTE_C6  1046 // 降B调 (b7) 频率
-#define NOTE_CS6 1109
-#define NOTE_D6  1175
-#define NOTE_E6  1319
-#define NOTE_FS6 1480
-#define NOTE_G6  1568
+  硬件：
+    Button        -> D2 与 GND
+    Passive Buzzer -> D8 与 GND
 
-// --- 节拍设置 (BPM = 82) ---
-// 四分音符 = 60000/82 ≈ 732ms
-const int WHOLE_NOTE      = 2928; // 全音符
-const int HALF_NOTE       = 1464; // 二分音符
-const int DOTTED_QUARTER  = 1098; // 附点四分音符
-const int QUARTER_NOTE    = 732;  // 四分音符
-const int DOTTED_EIGHTH   = 549;  // 附点八分音符
-const int EIGHTH_NOTE     = 366;  // 八分音符
-const int SIXTEENTH_NOTE  = 183;  // 十六分音符
-const int REST            = 0;    // 休止符
+  按键：
+    按下一次 -> 从头播放
+    使用 INPUT_PULLUP，不需要外接上拉电阻
 
-// --- 乐谱数据结构 ---
+  说明：
+    - 只取简谱上方旋律声部，不播放下方钢琴伴奏。
+    - 每一个音符都直接绑定毫秒时长。
+    - 连音/延音通过较长的 duration 实现。
+    - 简谱中的装饰音用短时值近似。
+*/
+
+#define BUTTON_PIN 2
+#define BUZZER_PIN 8
+
+// --------------------
+// 音符频率
+// 1=D
+// --------------------
+#define REST 0
+
+#define D4   294
+#define E4   330
+#define FS4  370
+#define G4   392
+#define A4   440
+#define B4   494
+#define CS5  554
+
+#define D5   587
+#define E5   659
+#define FS5  740
+#define G5   784
+#define A5   880
+#define B5   988
+#define CS6  1109
+#define D6   1175
+
+// --------------------
+// 82 BPM 对应时值
+// 四分音符 = 60000 / 82 = 731.7 ms
+// --------------------
+#define Q     732
+#define E     366
+#define S     183
+#define DQ    1098
+#define H     1464
+#define DH    2196
+
+// 简谱装饰音
+#define GRACE 60
+
 struct Note {
-  int pitch;      // 频率
-  int duration;   // 持续毫秒数
+  uint16_t freq;
+  uint16_t duration;
 };
 
-// --- 原神主题曲主旋律提取 (1=D, 3/4拍) ---
-// 注：已提取高音谱表主旋律，伴奏声部未包含。部分复杂连音为听感清晰做了简化。
-Note melody[] = {
-  // 第1-4小节 (前3小节休止)
-  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE},
-  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE},
-  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE},
-  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {NOTE_D6, QUARTER_NOTE},
-  
-  // 第5-8小节
-  {NOTE_G5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE},
-  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_CS6, SIXTEENTH_NOTE},
-  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
-  {NOTE_A5, QUARTER_NOTE}, {NOTE_E5, QUARTER_NOTE},
-  
-  // 第9-12小节
-  {NOTE_G5, QUARTER_NOTE}, {NOTE_G5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
-  {NOTE_FS5, QUARTER_NOTE}, {NOTE_G4, EIGHTH_NOTE}, {NOTE_E4, EIGHTH_NOTE},
-  {NOTE_D6, QUARTER_NOTE}, {NOTE_E6, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE},
-  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {NOTE_D6, QUARTER_NOTE},
+// ============================================================
+// 上方旋律声部
+// 每一项 = {音高, 毫秒}
+// ============================================================
+const Note melody[] = {
 
-  // 第13-16小节 (重复第5-8小节)
-  {NOTE_G5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE},
-  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_CS6, SIXTEENTH_NOTE},
-  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
-  {NOTE_A5, QUARTER_NOTE}, {NOTE_E5, QUARTER_NOTE},
+  // ====== 01-04 ======
+  {REST, Q}, {REST, Q}, {REST, Q},
+  {REST, Q}, {REST, Q}, {REST, Q},
+  {REST, Q}, {REST, Q}, {REST, Q},
+  {REST, Q}, {REST, Q}, {REST, Q},
 
-  // 第17-20小节
-  {NOTE_G5, QUARTER_NOTE}, {NOTE_G5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
-  {NOTE_FS5, QUARTER_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, EIGHTH_NOTE},
-  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE},
-  {NOTE_E5, QUARTER_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_CS6, EIGHTH_NOTE},
+  // ====== 05 ======
+  {G5, Q}, {REST, Q}, {A5, E}, {B5, E},
 
-  // 第21-24小节
-  {NOTE_D6, QUARTER_NOTE}, {NOTE_D6, EIGHTH_NOTE}, {NOTE_E6, EIGHTH_NOTE},
-  {NOTE_CS6, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
-  {NOTE_A5, QUARTER_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_FS5, EIGHTH_NOTE},
-  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_B5, SIXTEENTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
+  // ====== 06 ======
+  {CS6, Q}, {REST, Q},
+  {D6, GRACE}, {CS6, GRACE}, {B5, Q - GRACE * 2},
+  {A5, E},
 
-  // 第25-28小节
-  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
-  {NOTE_FS5, QUARTER_NOTE}, {NOTE_G4, EIGHTH_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, QUARTER_NOTE},
-  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE},
-  {NOTE_E5, QUARTER_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_CS6, EIGHTH_NOTE},
+  // ====== 07 ======
+  {B5, Q}, {REST, Q}, {A5, E}, {G5, E},
 
-  // 第29-32小节
-  {NOTE_D6, QUARTER_NOTE}, {NOTE_D6, EIGHTH_NOTE}, {NOTE_E6, EIGHTH_NOTE},
-  {NOTE_CS6, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
-  {NOTE_A5, QUARTER_NOTE}, {NOTE_B5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
-  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_B5, SIXTEENTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
+  // ====== 08 ======
+  {A5, Q}, {E5, Q}, {REST, Q},
 
-  // 第33-36小节
-  {NOTE_B5, DOTTED_QUARTER}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
-  {NOTE_FS5, QUARTER_NOTE}, {NOTE_G4, EIGHTH_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, QUARTER_NOTE},
-  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE},
-  {REST, QUARTER_NOTE}, {REST, QUARTER_NOTE}, {NOTE_D6, QUARTER_NOTE},
+  // ====== 09 ======
+  {G5, Q}, {REST, Q}, {G5, E}, {A5, E},
 
-  // 第37-40小节
-  {NOTE_G5, QUARTER_NOTE}, {NOTE_G5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
-  {NOTE_CS6, QUARTER_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_CS6, SIXTEENTH_NOTE},
-  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
-  {NOTE_A5, QUARTER_NOTE}, {NOTE_E5, QUARTER_NOTE},
+  // ====== 10 ======
+  {FS5, Q},
+  {G5, GRACE}, {FS5, GRACE}, {E5, DQ - GRACE * 2},
+  {D5, E},
 
-  // 第41-44小节
-  {NOTE_G5, QUARTER_NOTE}, {NOTE_G5, EIGHTH_NOTE}, {NOTE_A5, EIGHTH_NOTE},
-  {NOTE_FS5, QUARTER_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, EIGHTH_NOTE},
-  {NOTE_E5, QUARTER_NOTE}, {NOTE_B5, QUARTER_NOTE}, {REST, QUARTER_NOTE}, 
-  {NOTE_B5, HALF_NOTE}, {NOTE_D6, QUARTER_NOTE},
+  // ====== 11 ======
+  {E5, Q}, {B5, Q}, {REST, Q},
 
-  // 第45-48小节
-  {NOTE_G5, EIGHTH_NOTE}, {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_B5, EIGHTH_NOTE},
-  {NOTE_CS6, QUARTER_NOTE}, {NOTE_E6, EIGHTH_NOTE}, {NOTE_D6, DOTTED_EIGHTH}, {NOTE_B5, SIXTEENTH_NOTE}, {NOTE_A5, QUARTER_NOTE},
-  {NOTE_B5, QUARTER_NOTE}, {NOTE_A5, EIGHTH_NOTE}, {NOTE_G5, EIGHTH_NOTE},
-  {NOTE_A5, QUARTER_NOTE}, {NOTE_CS6, EIGHTH_NOTE}, {NOTE_E6, QUARTER_NOTE}, {REST, QUARTER_NOTE},
+  // ====== 12 ======
+  {REST, Q}, {REST, Q}, {D5, Q},
 
-  // 第49-52小节 (收尾)
-  {NOTE_G5, EIGHTH_NOTE}, {NOTE_E5, EIGHTH_NOTE}, {NOTE_G5, QUARTER_NOTE}, {NOTE_A5, QUARTER_NOTE},
-  {NOTE_FS5, QUARTER_NOTE}, {NOTE_E4, EIGHTH_NOTE}, {NOTE_D6, EIGHTH_NOTE},
-  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE},
-  {NOTE_E5, HALF_NOTE}, {NOTE_E5, QUARTER_NOTE}
+  // ====== 13 ======
+  {G5, Q}, {REST, Q}, {A5, E}, {B5, E},
+
+  // ====== 14 ======
+  {CS6, Q}, {REST, Q},
+  {D6, GRACE}, {CS6, GRACE}, {B5, Q - GRACE * 2},
+  {A5, E},
+
+  // ====== 15 ======
+  {B5, DQ}, {A5, E}, {A5, E}, {G5, E},
+
+  // ====== 16 ======
+  {A5, Q}, {E5, H},
+
+  // ====== 17 ======
+  {G5, Q}, {REST, Q},
+  {B5, GRACE}, {A5, E - GRACE}, // 6装饰音 -> 5
+  {G5, E},
+
+  // ====== 18 ======
+  {FS5, Q}, {E5, DQ}, {D5, E},
+
+  // ====== 19 ======
+  {E5, DH},
+
+  // ====== 20 ======
+  // 2 延续后接 6,7
+  {E5, H}, {B5, E}, {CS6, E},
+
+  // ====== 21 ======
+  {D5, Q}, {REST, Q}, {D5, E}, {E5, E},
+
+  // ====== 22 ======
+  {CS6, Q}, {B5, Q}, {A5, Q},
+
+  // ====== 23 ======
+  // 22末尾5 -> 23开头5，按连音处理
+  {A5, H}, {B5, Q}, {FS5, Q},
+
+  // ====== 24 ======
+  {CS6, Q}, {D6, GRACE}, {CS6, GRACE},
+  {B5, Q - GRACE * 2}, {A5, Q},
+
+  // ====== 25 ======
+  {B5, Q}, {REST, Q}, {A5, E}, {G5, E},
+
+  // ====== 26 ======
+  {FS5, Q}, {REST, Q},
+  {G5, GRACE}, {FS5, GRACE}, {E5, Q - GRACE * 2},
+  {D5, E},
+
+  // ====== 27 ======
+  {E5, DH},
+
+  // ====== 28 ======
+  {E5, H}, {B5, E}, {CS6, E},
+
+  // ====== 29 ======
+  {D5, Q}, {REST, Q}, {D5, E}, {E5, E},
+
+  // ====== 30 ======
+  {CS6, Q}, {B5, Q}, {A5, Q},
+
+  // ====== 31 ======
+  {A5, Q}, {B5, Q}, {A5, Q},
+
+  // ====== 32 ======
+  {CS6, Q},
+  {D6, GRACE}, {CS6, GRACE}, {B5, Q - GRACE * 2},
+  {A5, Q},
+
+  // ====== 33 ======
+  {B5, DQ}, {A5, E}, {A5, E}, {G5, E},
+
+  // ====== 34 ======
+  {FS5, Q},
+  {G5, GRACE}, {FS5, GRACE}, {E5, DQ - GRACE * 2},
+  {D5, E},
+
+  // ====== 35 ======
+  {E5, DH},
+
+  // ====== 36 ======
+  {REST, Q}, {REST, Q}, {D5, Q},
+
+  // ====== 37 ======
+  {G5, Q}, {REST, Q}, {A5, E}, {B5, E},
+
+  // ====== 38 ======
+  {CS6, Q}, {REST, Q},
+  {D6, GRACE}, {CS6, GRACE}, {B5, Q - GRACE * 2},
+  {A5, E},
+
+  // ====== 39 ======
+  {B5, Q}, {REST, Q}, {A5, E}, {G5, E},
+
+  // ====== 40 ======
+  {A5, Q}, {E5, Q}, {REST, Q},
+
+  // ====== 41 ======
+  {G5, Q}, {REST, Q},
+  {B5, GRACE}, {A5, E - GRACE},
+  {G5, E},
+
+  // ====== 42 ======
+  {FS5, Q}, {E5, DQ}, {D5, E},
+
+  // ====== 43-44 ======
+  {E5, Q},
+  {B5, H},       // 43末6 -> 44开6 连音
+  {REST, Q},
+  {D5, Q},
+
+  // ====== 45 ======
+  {G5, Q}, {REST, Q}, {A5, E}, {B5, E},
+
+  // ====== 46 ======
+  {CS6, Q}, {REST, Q},
+  {D6, GRACE}, {CS6, GRACE}, {B5, Q - GRACE * 2},
+  {A5, E},
+
+  // ====== 47 ======
+  {B5, Q}, {REST, Q}, {A5, E}, {G5, E},
+
+  // ====== 48 ======
+  {A5, Q}, {E5, Q}, {REST, Q},
+
+  // ====== 49 ======
+  {G5, Q}, {REST, Q}, {G5, E}, {A5, E},
+
+  // ====== 50 ======
+  {FS5, Q},
+  {G5, GRACE}, {FS5, GRACE}, {E5, DQ - GRACE * 2},
+  {D5, E},
+
+  // ====== 51-52 ======
+  // 最后一个2跨小节延长，按简谱连音合并成持续音
+  {E5, DH + DH}
 };
 
-int melodyLength = sizeof(melody) / sizeof(melody[0]);
+const uint16_t melodyLength =
+  sizeof(melody) / sizeof(melody[0]);
 
-void setup() {
-  pinMode(BUZZER_PIN, OUTPUT);
+
+// ============================================================
+// 播放一个音符
+// ============================================================
+void playNote(uint16_t frequency, uint16_t durationMs)
+{
+  if (frequency == REST) {
+    noTone(BUZZER_PIN);
+    delay(durationMs);
+    return;
+  }
+
+  tone(BUZZER_PIN, frequency);
+  delay(durationMs);
+  noTone(BUZZER_PIN);
 }
 
-void loop() {
-  // 循环播放整首曲子
-  for (int i = 0; i < melodyLength; i++) {
-    if (melody[i].pitch == REST || melody[i].duration == 0) {
-      // 休止符：不发声，只等待
-      delay(melody[i].duration);
-    } else {
-      // 播放音符，为了区分连续相同的音符，实际发声时间略短于节拍，留出间隔
-      int playDuration = melody[i].duration * 0.9; 
-      tone(BUZZER_PIN, melody[i].pitch, playDuration);
-      delay(melody[i].duration); // 等待整个节拍的时间
+
+// ============================================================
+// 播放整首
+// ============================================================
+void playMelody()
+{
+  for (uint16_t i = 0; i < melodyLength; i++) {
+    playNote(
+      melody[i].freq,
+      melody[i].duration
+    );
+  }
+
+  noTone(BUZZER_PIN);
+}
+
+
+// ============================================================
+// 按键：D2 -> 按钮 -> GND
+// ============================================================
+bool lastButtonState = HIGH;
+
+void setup()
+{
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  noTone(BUZZER_PIN);
+}
+
+
+void loop()
+{
+  bool currentButtonState = digitalRead(BUTTON_PIN);
+
+  // 检测从 HIGH -> LOW，即刚刚按下
+  if (lastButtonState == HIGH &&
+      currentButtonState == LOW)
+  {
+    delay(20);  // 消抖
+
+    if (digitalRead(BUTTON_PIN) == LOW)
+    {
+      playMelody();
     }
   }
-  
-  // 播完一遍后，停顿2秒，准备下一遍循环
-  delay(2000);
+
+  lastButtonState = currentButtonState;
 }
