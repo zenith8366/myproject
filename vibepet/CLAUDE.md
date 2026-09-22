@@ -6,17 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `pc/hook_client.py` —— Hook 客户端（短生命周期），仅用标准库。两条行为完全不同的路径：`PreToolUse` 审批（阻塞、向 stdout 输出决策）与其余事件的状态上报（非阻塞、stdout 零输出）
 - `pc/bridge_daemon.py` —— 桥接守护进程（常驻）。真实模式用 `bleak`（已装 3.0.2），`--no-ble` 模式不需要它
-- `pc/_smoke_test.py`（5 例）、`pc/_smoke_test_daemon.py`（11 例）、`pc/_smoke_test_state.py`（14 例）—— 冒烟测试，**均不依赖硬件或蓝牙**
+- `pc/_smoke_test.py`（7 例）、`pc/_smoke_test_daemon.py`（12 例）、`pc/_smoke_test_state.py`（14 例）—— 冒烟测试，**均不依赖硬件或蓝牙**
 - `README.md` —— **面向使用者**的文档（安装 / 日常使用 / 排障），受众与 CLAUDE.md 不同。改了用户可见的行为（命令行参数、状态含义、安装步骤）要同步更新它
 - `VibePet —— AI 编程助手物理状态显示与审批终端（无线 BLE 版）v2.0.md`（位于仓库根目录，文件名含中文、空格与全角破折号，引用时务必加引号）
 
 这份文档是**唯一权威规格**，涵盖需求、硬件选型与接线、通信协议、软件模块划分、示例代码、开发计划、测试方案与风险分析。开始任何实现前先读它。本文件只提炼跨章节阅读才能得出的约定，不替代文档；两者冲突时以设计文档为准。
 
-- `firmware/VibePet/VibePet.ino` —— ESP32-C3 固件（633 行）。**已通过编译验证**（`esp32:esp32` 3.3.11，零警告）
+- `firmware/VibePet/VibePet.ino` —— ESP32-C3 固件（641 行）。**已通过编译验证**（`esp32:esp32` 3.3.11，零警告）
 - `firmware/TFT_eSPI_User_Setup.h` —— TFT_eSPI 配置模板。**它不是编译单元**，是给库的 `User_Setup.h` 覆盖用的
 - `.claude/settings.json` —— Claude Code Hook 配置，挂在 6 个事件上，但**当前 6 处 command 全部以 `#` 注释着，不会生效**。启用方式与冲突提醒见 `.claude/README.md`
 
-**固件尚未在真实硬件上验证**（没有设备）。已确认的只有：能编译、Flash 占用 26%（Huge APP 分区，含约 200 KB 中文点阵字库）、协议字面量与电脑端逐一对齐、用到的 TFT_eSPI / U8g2_for_TFT_eSPI API 签名正确。**未确认**：TFT 初始化序列是否匹配你的模块（`ST7735_INITB` 可能需要换）、接线与引脚、真实 BLE 行为、屏幕布局与中文渲染的实际观感（wqy12 行高约 15px，摘要行数与坐标按此估算，上机后可能需微调）。
+**固件尚未在真实硬件上验证**（没有设备）。已确认的只有：能编译、Flash 占用 27%（Huge APP 分区，含约 200 KB 中文点阵字库）、协议字面量与电脑端逐一对齐、用到的 TFT_eSPI / U8g2_for_TFT_eSPI API 签名正确。**未确认**：TFT 初始化序列是否匹配你的模块（`ST7735_INITB` 可能需要换）、接线与引脚、真实 BLE 行为、屏幕布局与中文渲染的实际观感（wqy12 行高约 15px，摘要行数与坐标按此估算，上机后可能需微调）。
 
 **设计文档 5.5 节的示例代码是示意片段，不是可用实现，不要照抄**：daemon 部分缺断线重连、并发保护（F9 单槽会被第二个请求覆盖）与审批后状态复位（屏幕会永远停在 `APPROVE?`）；hook_client 部分缺 socket 超时（会让 Claude Code 永久卡死）、半关闭（与 daemon 的 `reader.read()` 互等死锁）和 UTF-8 处理。
 
@@ -24,8 +24,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # 冒烟测试（都不需要硬件或蓝牙）
-python pc/_smoke_test.py           # hook_client 审批路径：5 例
-python pc/_smoke_test_daemon.py    # bridge_daemon：8 例，含端到端联调
+python pc/_smoke_test.py           # hook_client 审批路径：7 例
+python pc/_smoke_test_daemon.py    # bridge_daemon：12 例，含端到端联调
 python pc/_smoke_test_state.py     # 事件 → 状态映射：14 例
 
 # 语法检查
@@ -175,10 +175,12 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 | TFT RES | 5 | |
 | 批准按钮 | 1 | `INPUT_PULLUP`，按下为 LOW |
 | 拒绝按钮 | 10 | `INPUT_PULLUP`，按下为 LOW |
-| 蜂鸣器 | 3 | 无源、低电平触发，故空闲保持 HIGH |
+| 蜂鸣器 | 3 | 无源，须 PWM 方波驱动（`tone()`），空闲保持 LOW |
 | LED 指示灯 | 2 | BLE 连接状态 |
 
 **引脚选择本身就带避坑意图，不要随意更换**：GPIO9 是 ESP32-C3 的启动引脚，必须避开；按钮接 `INPUT_PULLUP` 且选中上述引脚，是为了保证按住按钮上电时设备仍能正常启动、不误入下载模式（设计文档 4.3 的引脚确认表要求实测这一点，7.2 有对应用例）。
+
+**完整接线**（每个元件的第二根线接哪、接线顺序、上电前检查清单）见**设计文档 4.7**；上面这张表只列 GPIO 分配，给人快速查阅用。4.7 是接线的唯一权威，改引脚时以它为准。
 
 ## 硬性约束
 
@@ -201,7 +203,7 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 | BLE 库 | **NimBLE-Arduino 2.5.1**（而非 ESP32 原生 BLE 库，省 RAM 与 Flash）。2.x 的回调签名带 `NimBLEConnInfo&` 参数，写成 1.x 的 `onConnect(NimBLEServer*)` 会编译失败 |
 | 中文字体 | **U8g2 2.36.19 + U8g2_for_TFT_eSPI 1.7.0** —— 正文用 `u8g2_font_wqy12_t_gb2312`（约 200 KB Flash）。U8g2_for_TFT_eSPI 不在库管理器索引里，需 `git clone https://github.com/Bodmer/U8g2_for_TFT_eSPI` 到 libraries 目录 |
 | TFT 驱动 | TFT_eSPI 2.5.43（Bodmer 版），实际位于 `E:\Users\lyh35\Documents\Arduino\libraries` —— **库目录在 E 盘不是 C 盘**，找库时别找错 |
-| JSON 库 | ArduinoJson **7.4.3**（设计文档写的是 v6，实测 v7 亦可：`StaticJsonDocument` 在 v7 是兼容别名，所以代码对 v6/v7 通吃） |
+| JSON 库 | ArduinoJson **7.4.3**（设计文档写的是 v6，实测 v7 亦可）。注意 v7 里 `StaticJsonDocument<N>` 只是 `JsonDocument` 的兼容壳：**池是动态的**（堆分配、按需增长），`<N>` 既不限制也不预留内存 —— 与 v6 的「栈上定长池」语义不同，别指望它兜住内存上限；真正的上限由协议保证（整行 ≤ 512 字节） |
 | 电脑端 | Python ≥ 3.9 + `bleak` 3.0.2 + `asyncio` |
 
 Arduino IDE 关键配置（改动后需重新确认，并备份 TFT_eSPI 的 `User_Setup.h`）：开发板 `ESP32C3 Dev Module`、USB CDC On Boot `Enabled`、Partition Scheme `Huge APP (3MB No OTA/1MB SPIFFS)`、Flash Size `4MB`、Upload Speed `921600`。

@@ -14,7 +14,7 @@
  *   1. TFT_eSPI 库的 User_Setup.h 要按 firmware/TFT_eSPI_User_Setup.h 配置。
  *      驱动宏与初始化序列选错会花屏、偏色或显示区域偏移，须逐个试。
  *
- *   2. 下面 BUZZER_ACTIVE_LOW 要与你实际买的蜂鸣器模块一致。
+ *   2. 下面 BUZZER_ACTIVE 要与你实际焊上去的蜂鸣器一致（本项目选型是无源）。
  *
  * ────────────────── 与设计文档 5.5 示例代码的差异 ──────────────────
  *
@@ -44,10 +44,15 @@
 #define PIN_BUZZER       3
 #define PIN_LED_STATUS   2
 
-// 蜂鸣器模块类型：
-//   1 = 「3 针低电平触发」模块（内部自带振荡源，给低电平就发声）—— 设计文档 4.3 的选型
-//   0 = 裸无源蜂鸣器，需要 PWM 方波才能出声；直接给直流电平只会听到一声「咔哒」
-#define BUZZER_ACTIVE_LOW 1
+// 蜂鸣器类型 —— 本项目选型是无源（设计文档 4.3）：
+//   0 = 无源蜂鸣器：内部没有振荡源，必须靠 PWM 方波驱动才出声。给恒定
+//       直流电平只会听到一声「咔哒」，随后无声。
+//   1 = 有源蜂鸣器模块（「3 针低电平触发」那类）：内部自带振荡源，给恒定
+//       电平就持续发声，因此空闲必须保持高电平，否则上电即长鸣。
+#define BUZZER_ACTIVE 0
+
+// 无源蜂鸣器的驱动频率（Hz），2700 接近常见无源蜂鸣器的谐振点，最响。
+#define BUZZER_TONE_HZ 2700
 
 // —— BLE 协议（设计文档 3.3）——
 #define DEVICE_NAME      "VibePet"
@@ -330,12 +335,15 @@ void updateAnimation() {
 // ════════════════════════════ 蜂鸣器 ════════════════════════════
 
 void beepOnce(unsigned long ms) {
-#if BUZZER_ACTIVE_LOW
-  digitalWrite(PIN_BUZZER, LOW);   // 低电平触发
+#if BUZZER_ACTIVE
+  digitalWrite(PIN_BUZZER, LOW);   // 「低电平触发」模块：给恒定电平即发声
   delay(ms);
   digitalWrite(PIN_BUZZER, HIGH);
 #else
-  tone(PIN_BUZZER, 2700, ms);      // 无源蜂鸣器要方波
+  // 无源蜂鸣器：靠方波驱动。noTone() 必须显式调用 —— 它停振并释放
+  // LEDC 通道；tone() 的 duration 由 core 的 tone task 异步兜底，
+  // 真正的节拍来自这个 delay，两者一起保证「响 ms 毫秒」。
+  tone(PIN_BUZZER, BUZZER_TONE_HZ, ms);
   delay(ms);
   noTone(PIN_BUZZER);
 #endif
@@ -367,6 +375,10 @@ void setState(PetState next, const String& msg = "") {
 // ════════════════════════════ 消息处理 ════════════════════════════
 
 void processLine(const char* line) {
+  // ArduinoJson 7 里 StaticJsonDocument<N> 只是 JsonDocument 的兼容壳：池是动态的
+  // （堆分配、按需增长），<512> 既不限制也不预留内存，别把它当成 v6 那种
+  // 「栈上定长池」的安全保证。真正的内存上限来自协议 —— 整行 ≤ LINE_MAX(512)
+  // 字节，见设计文档 3.3 与 pc/bridge_daemon.py 的 MAX_FIELD_BYTES。
   StaticJsonDocument<512> doc;
   if (deserializeJson(doc, line) != DeserializationError::Ok) {
     Serial.printf("[vibepet] JSON 解析失败，已忽略: %s\n", line);
@@ -483,6 +495,12 @@ void checkWatchdog() {
 
 // ════════════════════════════ BLE ════════════════════════════
 
+// 行重组缓冲。放在文件级而不是回调内的函数静态量，是为了让 onDisconnect 也能
+// 复位它：断线时若正好停在半截行上，那截残片会在重连后与第一条消息拼在一起
+// 变成非法 JSON，白白丢掉一条。两者都在 BLE 任务里跑，不需要额外加锁。
+String rxLineBuffer;
+bool   rxDropping = false;
+
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     bleConnected = true;
@@ -493,6 +511,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
     bleConnected = false;
     digitalWrite(PIN_LED_STATUS, LOW);
+    rxLineBuffer = "";                      // 丢掉半截行，否则重连后它会把
+    rxDropping   = false;                   // 第一条消息拼成非法 JSON（见变量声明处）
     // 断开后重新广播，等 daemon 重连
     NimBLEDevice::startAdvertising();
     Serial.println("[vibepet] 中心设备已断开，重新广播");
@@ -503,30 +523,28 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
   // 只做切分与投递。解析放在 loop()，避免与主循环并发操作 String。
   void onWrite(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
     NimBLEAttValue value = pChar->getValue();
-    static String rxBuffer;
-    static bool rxDropping = false;       // 正在丢弃一条超长行的剩余字节
     for (size_t i = 0; i < value.size(); i++) {
       char c = (char)value[i];
       if (c == '\n') {
         if (rxDropping) {
           rxDropping = false;             // 超长行的结尾：丢弃模式复位
           Serial.println("[vibepet] 超长行已丢弃");
-        } else if (rxBuffer.length() > 0 && lineQueue != nullptr) {
+        } else if (rxLineBuffer.length() > 0 && lineQueue != nullptr) {
           char buf[LINE_MAX];
-          rxBuffer.toCharArray(buf, LINE_MAX);
+          rxLineBuffer.toCharArray(buf, LINE_MAX);
           // 队列满就丢弃这条，不阻塞 BLE 任务
           if (xQueueSend(lineQueue, buf, 0) != pdTRUE) {
             Serial.println("[vibepet] 队列已满，丢弃一条消息");
           }
         }
-        rxBuffer = "";
+        rxLineBuffer = "";
       } else if (rxDropping) {
         // 丢弃本行剩余字节，等 '\n' 复位。不能清空后继续累积 ——
         // 那会把半截尾巴当成一条完整消息投递进队列。
-      } else if (rxBuffer.length() < LINE_MAX - 1) {
-        rxBuffer += c;
+      } else if (rxLineBuffer.length() < LINE_MAX - 1) {
+        rxLineBuffer += c;
       } else {
-        rxBuffer = "";                    // 超长行整条丢弃，防止内存被撑爆
+        rxLineBuffer = "";                // 超长行整条丢弃，防止内存被撑爆
         rxDropping = true;
         Serial.println("[vibepet] 行超长，丢弃至行尾");
       }
@@ -570,10 +588,10 @@ void setup() {
   pinMode(PIN_BTN_DENY,    INPUT_PULLUP);
   pinMode(PIN_BUZZER,      OUTPUT);
   pinMode(PIN_LED_STATUS,  OUTPUT);
-#if BUZZER_ACTIVE_LOW
-  digitalWrite(PIN_BUZZER, HIGH);         // 低电平触发：空闲时保持高
+#if BUZZER_ACTIVE
+  digitalWrite(PIN_BUZZER, HIGH);         // 低电平触发模块：空闲保持高，否则上电即长鸣
 #else
-  digitalWrite(PIN_BUZZER, LOW);
+  digitalWrite(PIN_BUZZER, LOW);          // 无源：静止态，无直流偏置
 #endif
   digitalWrite(PIN_LED_STATUS, LOW);
 

@@ -142,7 +142,14 @@ def read_hook_input():
     raw = sys.stdin.buffer.read()
     if not raw.strip():
         raise ValueError("stdin 为空，未收到 Hook 输入")
-    return json.loads(raw.decode("utf-8"))
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        # 合法 JSON 但不是对象（数组 / 字符串 / 数字）。必须在 read_hook_input
+        # 里拦掉：放过去的话 main() 的 hook_input.get() 会抛 AttributeError，
+        # 进程以退出码 1 崩掉 —— 崩溃 = 不输出任何决策 = 放行，违反
+        # 「降级方向一律是拒绝」这条铁律（CLAUDE.md 硬性约束）。
+        raise ValueError(f"Hook 输入必须是 JSON 对象，实际是 {type(data).__name__}")
+    return data
 
 
 def request_decision(hook_input):
@@ -224,7 +231,10 @@ def handle_pre_tool_use(hook_input):
 
     try:
         action = request_decision(hook_input)
-    except TimeoutError:
+    except (TimeoutError, socket.timeout):
+        # Python 3.10 起 socket.timeout 是 TimeoutError 的别名，但 3.9 上它只是
+        # OSError 的子类（CLAUDE.md 声明支持 ≥3.9）。若只写 TimeoutError，3.9 的
+        # 超时会落到下面的 OSError 分支，日志被打成一文不对题的「通信失败」。
         log(f"等待 daemon 决策超时（{DECISION_TIMEOUT:g} s）")
         emit_decision(False, "VibePet: approval timed out")
         return 0

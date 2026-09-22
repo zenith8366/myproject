@@ -215,6 +215,11 @@ class Bridge:
         # 否则 _pending_request_id 这个单槽会被第二个请求覆盖，
         # 第一个请求就会永远等不到匹配的按钮，直到超时。
         self._approval_lock = asyncio.Lock()
+        # 串行化所有「会改变屏幕内容」的发送。send_state / send_approval_request
+        # 都是「读改写 _state_dirty + await 发送」的组合，并发交错时后一个会把
+        # 前一个设的脏标记覆盖掉（重连要补发的那一条就此丢失）。锁的嵌套顺序
+        # 固定为 _approval_lock → _send_lock，没有反向路径，不会死锁。
+        self._send_lock = asyncio.Lock()
         transport.set_line_handler(self._on_device_line)
 
     # —— 设备 → 电脑 ——
@@ -224,6 +229,13 @@ class Bridge:
             msg = json.loads(line)
         except json.JSONDecodeError:
             log(f"设备消息不是合法 JSON，已忽略: {line[:80]!r}")
+            return
+
+        # 设备固件只发对象，但这条链路是攻击面之外的外部输入（BLE 对端可能是
+        # 任何东西）。非对象 JSON 会让下面的 .get() 抛 AttributeError —— 它虽被
+        # asyncio 的异常处理器兜住不至于崩进程，却会留下未处理异常并丢掉这一行。
+        if not isinstance(msg, dict):
+            log(f"设备消息不是 JSON 对象（{type(msg).__name__}），已忽略: {line[:80]!r}")
             return
 
         if msg.get("type") != "button":
@@ -269,25 +281,29 @@ class Bridge:
         """
         msg = clamp_bytes(msg, MAX_FIELD_BYTES)
         key = (status, msg)
-        if key == self._last_state and not self._state_dirty:
-            debug(f"状态与当前显示相同，跳过: {status} / {msg!r}")
-            return
-        self._last_state = key        # 先记账，再尝试送达
-        self._state_dirty = True
-        await self._send({"type": "state", "status": status, "msg": msg})
-        self._state_dirty = False
+        async with self._send_lock:
+            # 去重判断必须和下面两行记账待在同一个临界区里，否则两次并发调用
+            # 会双双通过判断，把同一条状态发两遍。
+            if key == self._last_state and not self._state_dirty:
+                debug(f"状态与当前显示相同，跳过: {status} / {msg!r}")
+                return
+            self._last_state = key        # 先记账，再尝试送达
+            self._state_dirty = True
+            await self._send({"type": "state", "status": status, "msg": msg})
+            self._state_dirty = False
 
     async def send_approval_request(self, request_id, tool, summary):
-        await self._send({
-            "type": "approval_request",
-            "request_id": request_id,
-            "tool": tool,
-            "summary": clamp_bytes(summary, MAX_FIELD_BYTES),
-        })
-        # 设备此刻显示的是审批卡而非任何 state。标记屏幕内容与 _last_state
-        # 不符，否则审批结束后发回 working 会被去重逻辑误判成「与上次相同」
-        # 而静默丢弃，屏幕就永远卡在 APPROVE? 了。
-        self._state_dirty = True
+        async with self._send_lock:
+            await self._send({
+                "type": "approval_request",
+                "request_id": request_id,
+                "tool": tool,
+                "summary": clamp_bytes(summary, MAX_FIELD_BYTES),
+            })
+            # 设备此刻显示的是审批卡而非任何 state。标记屏幕内容与 _last_state
+            # 不符，否则审批结束后发回 working 会被去重逻辑误判成「与上次相同」
+            # 而静默丢弃，屏幕就永远卡在 APPROVE? 了。
+            self._state_dirty = True
 
     async def resend_current(self):
         """刚重连上时调用：把设备屏幕应有的内容补发一份。
@@ -304,10 +320,11 @@ class Bridge:
             await self.send_state(*self._last_state)
 
     async def wait_for_button(self, request_id, timeout):
-        """阻塞等待匹配 request_id 的按钮；超时返回 deny（设计文档 5.4）。"""
-        self._pending_request_id = request_id
-        self._button_action = None
-        self._button_event.clear()
+        """阻塞等待匹配 request_id 的按钮；超时返回 deny（设计文档 5.4）。
+
+        调用方必须**先**占好槽并清空按钮状态 —— 见 handle_approval 里那个同步块。
+        本函数只管等待与超时；request_id 用来确认 finally 里清的是自己的槽。
+        """
         try:
             await asyncio.wait_for(self._button_event.wait(), timeout=timeout)
             return self._button_action
@@ -315,7 +332,10 @@ class Bridge:
             log(f"审批超时（{timeout:g} s），降级为 deny")
             return "deny"
         finally:
-            self._pending_request_id = None
+            # 只清自己的槽。审批已被 _approval_lock 串行化，理论上不会遇到别人
+            # 的槽，但按 id 确认一下总比无条件清空安全。
+            if self._pending_request_id == request_id:
+                self._pending_request_id = None
 
     # —— 审批主流程 ——
 
@@ -331,7 +351,14 @@ class Bridge:
 
             # 先占槽再发送：按钮校验只认槽里的 request_id，若等 wait_for_button
             # 才写入，请求已发出而槽还空着的窗口里按钮会被误判为「无待审批」丢弃。
+            #
+            # 清空上一轮的按钮残留也必须在**这个同步块里**做（到下面 await 之间
+            # 没有让出点）：按钮只可能在槽占好之后到达，这里清完就不会被更晚到达
+            # 的按钮抢跑。若把清理挪进 wait_for_button，从占槽到那里之间到达的
+            # 按钮会被 clear() 抹掉，这次审批就只能干等到超时。
             self._pending_request_id = request_id
+            self._button_action = None
+            self._button_event.clear()
             self._pending_approval = {
                 "request_id": request_id,
                 "tool": tool_name,

@@ -58,12 +58,15 @@ class FakeDaemon:
         self.srv.close()
 
 
-def run_client(env_extra=None):
+def run_client(env_extra=None, raw_input=None):
+    """raw_input 给「畸形输入」用例直接喂原始字节，其余用例走标准 HOOK_INPUT。"""
     env = os.environ.copy()
     env.update(env_extra or {})
+    payload = (raw_input if raw_input is not None
+               else json.dumps(HOOK_INPUT, ensure_ascii=False).encode("utf-8"))
     return subprocess.run(
         [sys.executable, CLIENT],
-        input=json.dumps(HOOK_INPUT, ensure_ascii=False).encode("utf-8"),
+        input=payload,
         capture_output=True,
         env=env,
     )
@@ -73,11 +76,11 @@ results = []
 
 
 def check(name, expected_decision, response=None, reply=True, env_extra=None,
-          expect_forward=True, start_daemon=True):
+          expect_forward=True, start_daemon=True, raw_input=None):
     daemon = FakeDaemon(response, reply) if start_daemon else None
     time.sleep(0.35)
     try:
-        proc = run_client(env_extra)
+        proc = run_client(env_extra, raw_input)
     finally:
         if daemon:
             daemon.close()
@@ -129,6 +132,15 @@ check("daemon 不回包 -> 超时 deny", "deny", None, reply=False,
       env_extra={"VIBEPET_TIMEOUT": "2"}, expect_forward=False)
 check("daemon 未运行 -> deny", "deny", env_extra={"VIBEPET_PORT": "8799"},
       expect_forward=False, start_daemon=False)
+
+# —— 畸形输入不得让 Hook 崩溃 ——
+# 崩溃（非零退出码 + stdout 零字节）等于「不输出决策」，而 Claude Code 对
+# PreToolUse hook 的非零退出按非阻塞错误处理 = 放行，违反「降级一律拒绝」。
+# 数组 / 标量输入曾让 main() 的 hook_input.get() 抛未捕获的 AttributeError。
+check("非对象 JSON（数组）-> deny 且不崩溃", "deny", start_daemon=False,
+      raw_input=b"[1,2,3]", expect_forward=False)
+check("stdin 为空 -> deny 且不崩溃", "deny", start_daemon=False,
+      raw_input=b"", expect_forward=False)
 
 print("=" * 68)
 failed = 0

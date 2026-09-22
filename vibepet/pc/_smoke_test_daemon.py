@@ -409,6 +409,35 @@ try:
         problems.append(f"connection_loop 补发异常: {exc!r}")
     record("connection_loop 重连后自动补发", problems)
 
+    # —— 用例 12：并发发送同一条状态只下发一条 ——
+    # 去重判断若和记账不在同一个临界区，并发调用会双双通过判断，设备端收到
+    # 两条一模一样的消息、白刷一次屏。SlowTransport 的 sleep(0) 是必须的：
+    # RecordingTransport 里没有真正的让出点，gather 出来的三个协程会顺序跑完，
+    # 那样即使没有锁也测不出问题。
+    class SlowTransport(RecordingTransport):
+        async def send_line(self, text):
+            await asyncio.sleep(0)          # 制造真实让出点，让并发真正交错
+            await super().send_line(text)
+
+    async def drive_concurrent():
+        transport = SlowTransport()
+        bridge = Bridge(transport, 1.0)
+        await asyncio.gather(
+            bridge.send_state("working", "A"),
+            bridge.send_state("working", "A"),
+            bridge.send_state("working", "A"),
+        )
+        return transport.sent
+
+    problems = []
+    try:
+        sent = asyncio.run(drive_concurrent())
+        if len(sent) != 1:
+            problems.append(f"并发发同一条状态应只下发 1 条，实际 {len(sent)} 条: {sent}")
+    except Exception as exc:
+        problems.append(f"并发发送异常: {exc!r}")
+    record("并发发送同一条状态只下发一条", problems)
+
 finally:
     daemon_proc.terminate()
     try:

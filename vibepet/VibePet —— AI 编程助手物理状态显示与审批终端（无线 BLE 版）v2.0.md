@@ -207,18 +207,7 @@ graph TB
 
 > **中文显示**：TFT_eSPI 内置字体只有 ASCII 字形。正文（命令摘要 / 错误信息 / 状态副标题）用上表的 wqy12 字体渲染，中文可读；标题类大字（IDLE / WORKING / APPROVE? 等）仍是内置 GLCD，两种字体混排。旧版固件曾把中文替换为 `?`（`sanitizeAscii()`），现已移除。
 
-**接线参考（避开启动相关引脚）**：
-
-| ST7735S 引脚 | ESP32-C3 GPIO | 说明 |
-|---|---|---|
-| VCC | 3.3V | 屏幕电源 |
-| GND | GND | 公共地 |
-| CS | GPIO 7 | 片选 |
-| SDA (MOSI) | GPIO 6 | 数据 |
-| SCK | GPIO 4 | 时钟 |
-| A0 (DC) | GPIO 8 | 数据/命令切换 |
-| RES | GPIO 5 | 复位 |
-| LED | 3.3V | 背光 |
+**接线**：屏幕的 8 根线怎么接，见 **4.7.2 接线表**；引脚为何这样分配见 4.7.1 的引脚占用总览。接线只此一处权威，本节不再重复列一遍，免得日后两处打架。
 
 ### 4.3 按钮与蜂鸣器
 
@@ -226,8 +215,13 @@ graph TB
 |---|---|---|---|
 | 批准按钮 | 6×6 mm 微动开关 | GPIO 1 | 避开启动引脚 GPIO9，启用 `INPUT_PULLUP` |
 | 拒绝按钮 | 6×6 mm 微动开关 | GPIO 10 | 启用 `INPUT_PULLUP` |
-| 蜂鸣器 | 3 针低电平触发无源蜂鸣器 | GPIO 3 | 低电平触发，成本约 ¥5 |
+| 蜂鸣器 | 无源蜂鸣器（2 脚，直接接 GPIO） | GPIO 3 | 须 PWM 方波驱动，成本约 ¥5 |
 | LED 指示灯 | 3mm LED + 限流电阻 | GPIO 2 | BLE 连接状态指示 |
+
+> **选型澄清：「无源」与「低电平触发」不可兼得。** 「低电平触发」是**有源**蜂鸣器模块
+> （内部自带振荡源）的特性——给恒定电平就发声，才有触发极性可言；无源蜂鸣器内部没有
+> 振荡源，必须由 GPIO 输出 PWM 方波才出声，给恒定直流只会听到一声「咔哒」。本方案选
+> 无源，由 GPIO 3 输出方波驱动，固件对应 `BUZZER_ACTIVE 0`。
 
 **引脚确认表（务必实测）**：
 
@@ -252,6 +246,7 @@ graph TB
 - **去耦电容**：3.3V 引脚旁放置 100 nF 和 10 µF 电容。
 - **BLE 天线净空**：天线区域避免金属遮挡，电池远离天线。
 - **按钮去抖**：软件时间戳去抖 + 硬件并联 100 nF 电容（可选）。
+- **蜂鸣器限流（可选）**：无源蜂鸣器直连 GPIO 时，方波峰值电流可达 70~80 mA，超过 ESP32-C3 单脚推荐的 20 mA（50% 占空比下平均电流减半，通常可用）。若遇到音量异常或引脚发热，在蜂鸣器与 GPIO 之间串一只 100 Ω 电阻。
 - **下载模式**：如遇自动下载失败，按住板载 BOOT 键再连接 USB。
 
 ### 4.6 硬件清单与成本
@@ -261,11 +256,110 @@ graph TB
 | 主控 | ESP32-C3 SuperMini | 核心，BLE + 显示控制 | ¥15 |
 | 显示屏 | 1.77" ST7735S TFT（128×160） | 六种状态 + 审批卡 | 待核实 |
 | 按钮 | 6×6mm 微动开关 ×2 | 批准 / 拒绝 | ¥2 |
-| 蜂鸣器 | 无源蜂鸣器 | 审批提醒音 | ¥5 |
+| 蜂鸣器 | 无源蜂鸣器（2 脚） | 审批提醒音 | ¥5 |
 | LED | 3mm LED + 电阻 | BLE 状态指示 | ¥1 |
 | 连接 | 杜邦线 + 面包板 | 接线调试 | ¥10 |
 | 数据线 | USB-C（支持数据传输） | 供电 + 调试 | 自备 |
 | **合计** | | | **待核实**（原 0.96" 方案约 ¥48~60，换屏后需按实际采购价重算） |
+
+### 4.7 完整接线指南
+
+> 本节是**接线的唯一权威依据**。4.2 只讲屏幕选型、4.3 只讲选型与 GPIO 分配；全部外设的完整接法、接线顺序与上电前检查项都在本节。引脚定义若与别处冲突，以本节为准。
+
+#### 4.7.1 引脚占用总览
+
+| GPIO | 用途 | 接线要点 |
+|---|---|---|
+| **1** | 批准按钮 | 按钮一端接此脚、另一端接 GND；启用 `INPUT_PULLUP`，按下读到 LOW |
+| **2** | 状态 LED | 串 220 Ω 限流电阻（3.3 V 下约 6 mA），LED 长脚（正极）朝 GPIO |
+| **3** | 蜂鸣器 | **无源**蜂鸣器，靠 PWM 方波驱动（固件 `BUZZER_ACTIVE 0`），空闲保持低电平 |
+| **4** | TFT SCK | SPI 时钟 |
+| **5** | TFT RES | 复位 |
+| **6** | TFT SDA (MOSI) | SPI 数据 |
+| **7** | TFT CS | 片选 |
+| **8** | TFT A0 (DC) | 数据 / 命令切换 |
+| **10** | 拒绝按钮 | 同批准按钮 |
+| 3.3V | TFT VCC、TFT LED | 屏幕电源与背光（背光常亮，不占 GPIO） |
+| GND | 公共地 | 所有外设的第二根线最终都回到这里 |
+
+**必须空置的引脚**（接线时不要顺手接上去）：
+
+| 引脚 | 为什么不能占 |
+|---|---|
+| **GPIO 9** | ESP32-C3 的启动模式（strapping）脚。接上外设会让设备上电即进入下载模式，或干脆不启动——这是本项目全程避开它的原因 |
+| GPIO 18 / 19 | USB D− / D+，`USB CDC On Boot = Enabled` 时供 USB 使用 |
+| GPIO 20 / 21 | UART0 RX / TX，串口日志走这里 |
+
+> **为什么按钮选 GPIO 1 与 10？** 除了避开 GPIO 9，还要求**按住按钮上电时设备仍能正常启动**（4.3 的引脚确认表把这条列为必测项）。低电平触发 + 内部上拉正好满足：不按是 HIGH、按下才拉到 LOW，上电瞬间不会被误读成下载模式。
+
+#### 4.7.2 接线表
+
+**显示屏（1.77" ST7735S，8 线）**
+
+| ST7735S 丝印 | ESP32-C3 | 说明 |
+|---|---|---|
+| VCC | 3.3V | 屏幕电源 |
+| GND | GND | 公共地 |
+| CS | GPIO 7 | 片选 |
+| SDA（部分模块标 MOSI） | GPIO 6 | SPI 数据 |
+| SCK（部分模块标 SCL） | GPIO 4 | SPI 时钟 |
+| A0（部分模块标 DC） | GPIO 8 | 数据 / 命令切换 |
+| RES（部分模块标 RST） | GPIO 5 | 复位 |
+| LED（部分模块标 BL） | 3.3V | 背光常亮；本方案不做软件调光（原因见 `TFT_eSPI_User_Setup.h` 的 TFT_BL 注释） |
+
+**按钮、蜂鸣器、指示灯**
+
+| 元件 | 第一根线 | 第二根线 |
+|---|---|---|
+| 批准按钮 | GPIO 1 | GND |
+| 拒绝按钮 | GPIO 10 | GND |
+| 蜂鸣器 | GPIO 3（＋ / 长脚） | GND |
+| 状态 LED | 220 Ω 电阻的一端接 GPIO 2，另一端接 LED 长脚（正极） | LED 短脚（负极）接 GND |
+
+> 6×6 mm 微动开关是 4 脚器件，**同侧两脚内部相通**。要跨对角接（一侧接 GPIO、对角接 GND），按下才导通；接成同侧两脚等于一直按着。
+> 无源蜂鸣器接反通常也能响（只是相位相反），按 ＋/− 标记接更稳妥。供电方案见 4.4。
+
+#### 4.7.3 接线拓扑
+
+```text
+  ESP32-C3 SuperMini          1.77" ST7735S TFT
+  ──────────────────          ─────────────────
+     3V3 ────────────────────── VCC
+     GND ────────────────────── GND
+     GP7 ────────────────────── CS
+     GP6 ────────────────────── SDA (MOSI)
+     GP4 ────────────────────── SCK
+     GP8 ────────────────────── A0 (DC)
+     GP5 ────────────────────── RES
+     3V3 ────────────────────── LED（背光，常亮）
+
+  ESP32-C3 SuperMini          其余外设
+  ──────────────────          ────────
+     GP3 ────────────────────── 蜂鸣器 ＋（－ 接 GND）
+     GP1 ────────────────────── 批准按钮（另一端接 GND）
+     GP10 ────────────────────── 拒绝按钮（另一端接 GND）
+     GP2 ──── 220Ω ── LED ───── GND
+```
+
+#### 4.7.4 接线顺序
+
+按 8.3 的自底向上顺序接，每一步都能单独验证，不要一次接完再上电：
+
+| 步骤 | 接什么 | 接完怎么验证 |
+|---|---|---|
+| 1 | 两条电源轨（3.3V / GND） | 万用表确认与开发板 3.3V 相通，且 3.3V 与 GND **不短路** |
+| 2 | TFT 的 8 根线 | 烧录固件后屏幕应显示 `VibePet / starting...`。花屏、偏色、偏移 → 是初始化序列问题（见 4.2），不是接线 |
+| 3 | 两个按钮 | 万用表通断档：不按不通、按下导通。上电后按键，串口应打印按钮日志 |
+| 4 | 蜂鸣器与状态 LED | 上电应听到提示音、LED 点亮；进入 `needs_you` 时能听到提示音 |
+
+#### 4.7.5 上电前检查清单
+
+- [ ] 3.3V 与 GND 之间**不短路**（万用表确认）
+- [ ] 没有外设接到 GPIO 9 / 18 / 19 / 20 / 21
+- [ ] TFT 的 VCC 接的是 **3.3V**，不是 5V
+- [ ] 蜂鸣器确实是**无源**的（固件顶部 `BUZZER_ACTIVE` 默认 `0` 即无源；若手头是有源模块，改回 `1`）
+- [ ] **按住批准按钮上电**，设备仍能正常启动并广播（4.3 引脚确认表的必测项）
+- [ ] USB 线支持数据传输（纯充电线枚举不出串口）
 
 ## 五、软件设计与实现
 
@@ -405,6 +499,8 @@ daemon 的 `wait_for_button()` 使用 `asyncio.Event` 实现异步阻塞，默�
 - `heartbeat_lost`：橙色背景，黑色 “LOST” 大字。
 
 ### 5.5 核心代码片段
+
+> ⚠️ **本节全部是示意片段，不是可用实现，不要照抄。** 三段都省掉了线上必需的细节：daemon 缺断线重连、并发保护（F9 的单槽会被第二个请求覆盖）与审批后状态复位（屏幕会永远停在 `APPROVE?`）；hook_client 缺 socket 超时（会让 Claude Code 永久卡死）、半关闭与 UTF-8 处理。**完整可用的实现是 `pc/` 与 `firmware/` 下的代码**，逐条差异见 `CLAUDE.md`。片段里的常量（UUID、心跳、超时）与实现一致，可直接对照。
 
 **（1）电脑端 bridge_daemon.py（核心逻辑）**
 
@@ -601,11 +697,13 @@ String currentRequestId = "";
 unsigned long lastAnim = 0;
 
 class ServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer*) override {
+  // NimBLE-Arduino 2.x 的回调签名带 NimBLEConnInfo&；写成 1.x 的
+  // onConnect(NimBLEServer*) 会编译失败。参数可以不用，但形参不能省。
+  void onConnect(NimBLEServer*, NimBLEConnInfo& connInfo) override {
     bleConnected = true;
     digitalWrite(LED_STATUS, HIGH);
   }
-  void onDisconnect(NimBLEServer*) override {
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo& connInfo, int reason) override {
     bleConnected = false;
     digitalWrite(LED_STATUS, LOW);
     NimBLEDevice::startAdvertising();
@@ -613,7 +711,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 };
 
 class RxCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* pChar) override {
+  void onWrite(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
     std::string value = pChar->getValue();
     for (char c : value) {
       if (c == '\n') {
@@ -633,7 +731,7 @@ void setup() {
   pinMode(BTN_DENY,    INPUT_PULLUP);
   pinMode(BUZZER,      OUTPUT);
   pinMode(LED_STATUS,  OUTPUT);
-  digitalWrite(BUZZER, HIGH);
+  digitalWrite(BUZZER, LOW);   // 无源蜂鸣器：空闲保持低，静止无声
 
   tft.init();
   tft.setRotation(1);
@@ -793,9 +891,9 @@ void updateAnimation() {
 
 void beep(int times) {
   for (int i = 0; i < times; i++) {
-    digitalWrite(BUZZER, LOW);
+    tone(BUZZER, 2700, 50);   // 无源蜂鸣器：方波驱动才出声
     delay(50);
-    digitalWrite(BUZZER, HIGH);
+    noTone(BUZZER);           // 停振并释放 LEDC 通道
     delay(50);
   }
 }
@@ -894,7 +992,7 @@ ESP32 端采用**主循环轮询 + BLE 回调**模式。BLE 数据接收在 NimB
 | 按钮误触发 | 中 | 低 | 时间戳去抖 + request_id 匹配 |
 | GPIO 选择影响启动 | 中 | 高 | 避开 GPIO9 等启动引脚；实测按住按钮上电 |
 | 电池方案不安全 | 中 | 高 | 第一版仅 USB 供电；电池作为可选加分项，正确接法 |
-| JSON 解析内存溢出 | 低 | 高 | 使用 `JsonDocument`（ArduinoJson 7 动态池）；协议层限制整行 ≤512 字节、单字段 ≤240 字节 |
+| JSON 解析内存溢出 | 低 | 高 | 解析用 ArduinoJson 7 的 `JsonDocument`（动态池，堆分配；`StaticJsonDocument<N>` 在 v7 已不限制内存）；内存上限**由协议层保证**：整行 ≤512 字节、单字段 ≤240 字节 |
 | 中文字库撑爆 Flash | 中 | 中 | wqy12 字库约 200 KB，分区固定 Huge APP (3MB)；编译后确认占用（实测 26%） |
 | 审批后 / 失联恢复时屏幕卡在过期画面 | 中 | 中 | 按钮按下即本地切画面；LOST 恢复到最后有效状态（审批卡转 idle）；daemon 重连后补发当前状态 |
 
