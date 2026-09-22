@@ -7,12 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `pc/hook_client.py` —— Hook 客户端（短生命周期），仅用标准库。两条行为完全不同的路径：`PreToolUse` 审批（阻塞、向 stdout 输出决策）与其余事件的状态上报（非阻塞、stdout 零输出）
 - `pc/bridge_daemon.py` —— 桥接守护进程（常驻）。真实模式用 `bleak`（已装 3.0.2），`--no-ble` 模式不需要它
 - `pc/_smoke_test.py`（7 例）、`pc/_smoke_test_daemon.py`（12 例）、`pc/_smoke_test_state.py`（14 例）—— 冒烟测试，**均不依赖硬件或蓝牙**
+- **三个核心文件的注释是刻意写给新手看的**（`pc/hook_client.py`、`pc/bridge_daemon.py`、`firmware/VibePet/VibePet.ino`）：每个函数前有一段大白话说明「这段在干嘛、为什么需要它」，容易卡住新手的行再逐行拆解。注释密度高于一般工程代码，这是本项目目标读者（没写过嵌入式 / 异步程序的人）决定的 —— **不要以「注释太多/太啰嗦」为由删减**
 - `README.md` —— **面向使用者**的文档（安装 / 日常使用 / 排障），受众与 CLAUDE.md 不同。改了用户可见的行为（命令行参数、状态含义、安装步骤）要同步更新它
 - `VibePet —— AI 编程助手物理状态显示与审批终端（无线 BLE 版）v2.0.md`（位于仓库根目录，文件名含中文、空格与全角破折号，引用时务必加引号）
 
 这份文档是**唯一权威规格**，涵盖需求、硬件选型与接线、通信协议、软件模块划分、示例代码、开发计划、测试方案与风险分析。开始任何实现前先读它。本文件只提炼跨章节阅读才能得出的约定，不替代文档；两者冲突时以设计文档为准。
 
-- `firmware/VibePet/VibePet.ino` —— ESP32-C3 固件（641 行）。**已通过编译验证**（`esp32:esp32` 3.3.11，零警告）
+- `firmware/VibePet/VibePet.ino` —— ESP32-C3 固件（881 行，其中约三分之一是面向新手的注释）。**已通过编译验证**（`esp32:esp32` 3.3.11，零警告）
 - `firmware/TFT_eSPI_User_Setup.h` —— TFT_eSPI 配置模板。**它不是编译单元**，是给库的 `User_Setup.h` 覆盖用的
 - `.claude/settings.json` —— Claude Code Hook 配置，挂在 6 个事件上，但**当前 6 处 command 全部以 `#` 注释着，不会生效**。启用方式与冲突提醒见 `.claude/README.md`
 
