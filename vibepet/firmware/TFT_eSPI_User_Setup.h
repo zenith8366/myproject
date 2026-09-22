@@ -59,15 +59,17 @@
 // #define TFT_INVERSION_ON
 
 // ─────────────────────────── 字体 ───────────────────────────
-// GLCD 是内置的 6×8 等宽字体，固件的所有绘制都基于它（见 VibePet.ino 的 CHAR_W 宏）。
+// GLCD 是内置的 6×8 等宽字体，固件的标题类文字（IDLE / WORKING / APPROVE? …）用它。
 #define LOAD_GLCD
 
 // Font 2 (16px) 与 Font 4 (26px) 供后续扩展使用，不影响当前固件。
 #define LOAD_FONT2
 #define LOAD_FONT4
 
-// 注意：以上字体都只包含 ASCII 字形，显示中文需要另行加载中文字体。
-// 固件里的 sanitizeAscii() 会把中文替换成 '?'，原因就在这。
+// 注意：以上字体都只包含 ASCII 字形。正文（命令摘要 / 错误信息 / 状态副标题）
+// 里的中文由 U8g2_for_TFT_eSPI 的 wqy12 GB2312 字体渲染（见 VibePet.ino 的
+// FONT_BODY），与本文件无关；但需要额外安装 U8g2 与 U8g2_for_TFT_eSPI 两个库，
+// 且分区要选 Huge APP（字库约 200 KB）。
 
 // ─────────────────────────── SPI 速度 ───────────────────────────
 // 27 MHz 对 ST7735 是稳妥值。杜邦线接线较长、画面出现条纹或噪点时，

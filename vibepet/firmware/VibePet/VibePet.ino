@@ -25,12 +25,15 @@
  *   · BLE 回调：示例在回调里直接解析 JSON 并改全局状态，而回调运行在 BLE
  *     任务里，与 loop() 并发操作 String 有崩溃风险。这里回调只负责按 \n
  *     切分并投递到 FreeRTOS 队列，解析全部放到主循环。
- *   · 文字：内置字体只有 ASCII 字形，摘要里的中文会被替换成 '?'（见 sanitizeAscii）。
+ *   · 文字：标题类大字仍用内置 GLCD 字体（ASCII），正文（命令摘要 / 错误
+ *     信息 / 状态副标题）改用 U8g2_for_TFT_eSPI 的 wqy12 GB2312 中文字体，
+ *     中文可以正常显示（见 FONT_BODY）。
  */
 
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
 #include <TFT_eSPI.h>
+#include <U8g2_for_TFT_eSPI.h>
 #include <math.h>
 
 // ════════════════════════════ 配置 ════════════════════════════
@@ -70,7 +73,9 @@ const unsigned long BLINK_INTERVAL   = 500;   // APPROVE? 边框闪烁半周期
 
 // —— 消息队列 ——
 // BLE 回调运行在 BLE 任务，解析在主循环，两者不能直接共享 String。
-#define LINE_MAX         192
+// 512 字节：电脑端单字段（summary/msg）上限 240 字节，带中文的
+// approval_request 整行约 330 字节，留足余量；队列 8×512 = 4 KB。
+#define LINE_MAX         512
 #define LINE_QUEUE_DEPTH 8
 
 // ════════════════════════════ 全局状态 ════════════════════════════
@@ -78,6 +83,7 @@ const unsigned long BLINK_INTERVAL   = 500;   // APPROVE? 边框闪烁半周期
 enum PetState { ST_IDLE, ST_WORKING, ST_NEEDS_YOU, ST_DONE, ST_ERROR, ST_LOST };
 
 TFT_eSPI tft = TFT_eSPI();
+U8g2_for_TFT_eSPI u8f;        // 正文的中文字体渲染（TFT_eSPI 内置字体只有 ASCII）
 NimBLECharacteristic* txChar = nullptr;
 QueueHandle_t lineQueue = nullptr;
 
@@ -86,6 +92,11 @@ volatile bool bleConnected = false;
 PetState currentState = ST_IDLE;
 String statusMsg      = "";   // error 的错误信息 / needs_you 的命令摘要
 String currentRequestId = ""; // 仅在有审批请求时非空
+
+// 失联恢复用：最近一个非 LOST 状态及其文案。看门狗把画面改成 ST_LOST 前
+// 先记在这里，心跳恢复时切回去（而不是像以前那样重画一遍 LOST）。
+PetState lastValidState = ST_IDLE;
+String lastValidMsg = "";
 
 unsigned long lastHeartbeat = 0;
 bool lostShown = false;
@@ -108,9 +119,6 @@ float animPhase = 0.0f;
 #define C_LOST  TFT_ORANGE
 
 // ════════════════════════════ 显示辅助 ════════════════════════════
-
-// 内置 GLCD 字体是 6×8 等宽，放大 size 倍后每字符宽 6*size 像素
-#define CHAR_W(size) (6 * (size))
 
 void drawCentered(const char* text, int y, uint8_t size, uint16_t color) {
   tft.setTextSize(size);
@@ -135,56 +143,76 @@ void thickLine(int x0, int y0, int x1, int y1, uint16_t color, int w = 3) {
   }
 }
 
+// ── 正文（摘要 / 错误信息 / 状态副标题）用 u8g2 的中文字体渲染 ──
+// wqy12 = 文泉驿点阵宋体 12px，覆盖完整 GB2312（约 200 KB Flash，仅此一处
+// 字体数据）。标题类大字仍是 GLCD，两种字体混排视觉上接近。
+#define FONT_BODY u8g2_font_wqy12_t_gb2312
+
 /*
- * TFT_eSPI 内置字体只有 ASCII 字形，直接 print 中文会显示成乱码方块。
- * 这里把每个 UTF-8 多字节序列整体替换成一个 '?' —— 至少保证屏幕可读，
- * 也让命令摘要的长度估算不至于因为一个汉字算 3 个字符而错位。
- *
- * 想要真正显示中文，需要给 TFT_eSPI 加载中文字体（体积不小），
- * 属于后续可选项。
+ * 控制字符（\n \t 等）会让折行与光标错位，替换成空格；其余字节原样保留。
+ * 不再像旧版 sanitizeAscii 那样把中文替换成 '?' —— 中文交给 FONT_BODY 渲染。
  */
-String sanitizeAscii(const String& src) {
+String cleanControl(const String& src) {
   String out;
   out.reserve(src.length());
-  size_t i = 0;
-  while (i < src.length()) {
+  for (size_t i = 0; i < src.length(); i++) {
     uint8_t c = (uint8_t)src[i];
-    if (c < 0x80) {
-      out += (c >= 32) ? (char)c : ' ';
-      i++;
-    } else {
-      out += '?';
-      if ((c & 0xE0) == 0xC0)      i += 2;
-      else if ((c & 0xF0) == 0xE0) i += 3;
-      else if ((c & 0xF8) == 0xF0) i += 4;
-      else                          i += 1;
-    }
+    out += (c < 0x20 || c == 0x7F) ? ' ' : (char)c;
   }
   return out;
 }
 
+// 返回 s[i] 起始的 UTF-8 码点字节数（1~4）；非法前缀字节按 1 处理
+int utf8Step(const String& s, int i) {
+  uint8_t c = (uint8_t)s[i];
+  if (c < 0x80) return 1;
+  if ((c & 0xE0) == 0xC0) return 2;
+  if ((c & 0xF0) == 0xE0) return 3;
+  if ((c & 0xF8) == 0xF0) return 4;
+  return 1;
+}
+
 // 按屏宽折行输出，最多 maxLines 行；放不下时末行以 ".." 收尾
-void drawWrapped(const String& raw, int y, uint8_t size, uint16_t color, int maxLines) {
-  String text = sanitizeAscii(raw);
-  int perLine = (SCREEN_W - 8) / CHAR_W(size);
-  if (perLine < 4) perLine = 4;
+void drawWrapped(const String& raw, int y, uint16_t color, int maxLines) {
+  const String text = cleanControl(raw);
+  u8f.setFont(FONT_BODY);
+  u8f.setForegroundColor(color);
+
+  const int maxWidth = SCREEN_W - 8;
+  const int lineHeight = u8f.getFontAscent() - u8f.getFontDescent() + 2;
+  const int len = (int)text.length();
+
+  // 从 start 起贪心取最长的、渲染宽度不超过 limit 的 UTF-8 前缀长度。
+  // 文本很短（≤240 字节），逐字符测宽的平方复杂度只在状态切换时跑一次。
+  auto greedyTake = [&](int start, int limit) -> int {
+    int take = 0;
+    while (start + take < len) {
+      int step = utf8Step(text, start + take);
+      if (start + take + step > len) step = len - start - take;  // 尾部残缺字节
+      const int w = u8f.getUTF8Width(text.substring(start, start + take + step).c_str());
+      if (w > limit) {
+        if (take == 0) return step;   // 单字符就超宽：至少输出它，防死循环
+        break;
+      }
+      take += step;
+    }
+    return take;
+  };
 
   int pos = 0, line = 0;
-  const int lineHeight = 8 * size + 3;
-  while (pos < (int)text.length() && line < maxLines) {
-    bool overflow = ((int)text.length() - pos) > perLine;
-    int take = perLine;
-    String chunk;
-    if (overflow && line == maxLines - 1) {
-      take = perLine - 2;                       // 给 ".." 让位
-      chunk = text.substring(pos, pos + take) + "..";
-    } else {
-      chunk = text.substring(pos, pos + take);
+  while (pos < len && line < maxLines) {
+    int take = greedyTake(pos, maxWidth);
+    // 末行放不下剩余内容时，给 ".." 让位重新折一次
+    if (line == maxLines - 1 && pos + take < len) {
+      take = greedyTake(pos, maxWidth - u8f.getUTF8Width(".."));
+      if (take == 0) break;
     }
-    tft.setTextSize(size);
-    tft.setTextColor(color);
-    tft.setCursor(4, y + line * lineHeight);
-    tft.print(chunk);
+    const int baseline = y + line * lineHeight + u8f.getFontAscent();
+    const String chunk = text.substring(pos, pos + take);
+    u8f.drawUTF8(4, baseline, chunk.c_str());
+    if (line == maxLines - 1 && pos + take < len) {
+      u8f.drawUTF8(4 + u8f.getUTF8Width(chunk.c_str()), baseline, "..");
+    }
     pos += take;
     line++;
   }
@@ -237,29 +265,33 @@ void renderState() {
     case ST_IDLE:
       drawIdleIcon();
       drawCentered("IDLE", 70, 2, C_IDLE);
+      if (statusMsg.length()) drawWrapped(statusMsg, 92, TFT_WHITE, 2);
       break;
 
     case ST_WORKING:
       drawWorkingIcon();
       drawCentered("WORKING", 70, 2, C_WORK);
+      if (statusMsg.length()) drawWrapped(statusMsg, 92, TFT_WHITE, 2);
       break;
 
     case ST_NEEDS_YOU:
       // 审批卡没有大图标：重点是把命令摘要尽量多地显示出来
       drawCentered("APPROVE?", 8, 2, C_NEED);
-      drawWrapped(statusMsg, 34, 1, TFT_WHITE, 7);
+      // 4 行 × 约 15px 行高，止于提示行上方；实测行高后可再调
+      drawWrapped(statusMsg, 34, TFT_WHITE, 4);
       drawCentered("[v] approve   [x] deny", 112, 1, TFT_DARKGREY);
       break;
 
     case ST_DONE:
       drawDoneIcon();
       drawCentered("DONE", 70, 2, C_DONE);
+      if (statusMsg.length()) drawWrapped(statusMsg, 92, TFT_WHITE, 2);
       break;
 
     case ST_ERROR:
       drawErrorIcon();
       drawCentered("ERROR", 66, 2, C_ERR);
-      drawWrapped(statusMsg, 90, 1, TFT_WHITE, 3);
+      drawWrapped(statusMsg, 90, TFT_WHITE, 2);
       break;
 
     case ST_LOST:
@@ -321,13 +353,15 @@ void beep(int times, unsigned long ms = 60) {
 // ════════════════════════════ 状态切换 ════════════════════════════
 
 void setState(PetState next, const String& msg = "") {
-  bool changed = (next != currentState);
+  if (next != ST_LOST) {           // LOST 是看门狗临时覆盖的画面，不算「有效状态」
+    lastValidState = next;
+    lastValidMsg = msg;
+  }
   currentState = next;
   statusMsg = msg;
   animPhase = 0.0f;
   blinkOn = true;
   renderState();
-  (void)changed;
 }
 
 // ════════════════════════════ 消息处理 ════════════════════════════
@@ -407,6 +441,10 @@ void scanButtons() {
     lastApproveMs = millis();
     if (currentRequestId.length() > 0) {       // 没有待审批请求时不发无意义的包
       sendButton("approve");
+      // 本地立即切画面并作废 request_id：不再等电脑端回话才脱离 APPROVE?
+      // （BLE 抖动时那里会一直卡着），长按也不会每 200 ms 重复发包。
+      currentRequestId = "";
+      setState(ST_WORKING, "已批准");
       beep(2, 35);
     }
   }
@@ -414,6 +452,8 @@ void scanButtons() {
     lastDenyMs = millis();
     if (currentRequestId.length() > 0) {
       sendButton("deny");
+      currentRequestId = "";
+      setState(ST_IDLE, "已拒绝");
       beep(1, 120);
     }
   }
@@ -428,12 +468,15 @@ void checkWatchdog() {
     lostShown = true;
     currentState = ST_LOST;      // 直接切，不走 setState：失联期间不该保留旧文案
     statusMsg = "";
+    currentRequestId = "";       // 此时按钮回传也送不出去，作废以防恢复后幽灵批准
     renderState();
     Serial.println("[vibepet] 心跳超时，进入 LOST");
   } else if (!isLost && lostShown) {
-    // 心跳恢复：把画面切回最后一条状态命令（通常是 daemon 重连后重发的 state）
+    // 心跳恢复：切回失联前的最后有效状态。若那是审批请求，恢复成 idle 而不是
+    // APPROVE? —— 请求可能已被电脑端判超时，显示过期卡片会误导用户按下无效按钮。
     lostShown = false;
-    setState(currentState, statusMsg);
+    if (lastValidState == ST_NEEDS_YOU) setState(ST_IDLE, "");
+    else                                setState(lastValidState, lastValidMsg);
     Serial.println("[vibepet] 心跳恢复");
   }
 }
@@ -461,10 +504,14 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
     NimBLEAttValue value = pChar->getValue();
     static String rxBuffer;
+    static bool rxDropping = false;       // 正在丢弃一条超长行的剩余字节
     for (size_t i = 0; i < value.size(); i++) {
       char c = (char)value[i];
       if (c == '\n') {
-        if (rxBuffer.length() > 0 && lineQueue != nullptr) {
+        if (rxDropping) {
+          rxDropping = false;             // 超长行的结尾：丢弃模式复位
+          Serial.println("[vibepet] 超长行已丢弃");
+        } else if (rxBuffer.length() > 0 && lineQueue != nullptr) {
           char buf[LINE_MAX];
           rxBuffer.toCharArray(buf, LINE_MAX);
           // 队列满就丢弃这条，不阻塞 BLE 任务
@@ -473,10 +520,15 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
           }
         }
         rxBuffer = "";
+      } else if (rxDropping) {
+        // 丢弃本行剩余字节，等 '\n' 复位。不能清空后继续累积 ——
+        // 那会把半截尾巴当成一条完整消息投递进队列。
       } else if (rxBuffer.length() < LINE_MAX - 1) {
         rxBuffer += c;
       } else {
-        rxBuffer = "";                    // 超长行直接丢弃，防止内存被撑爆
+        rxBuffer = "";                    // 超长行整条丢弃，防止内存被撑爆
+        rxDropping = true;
+        Serial.println("[vibepet] 行超长，丢弃至行尾");
       }
     }
   }
@@ -528,6 +580,11 @@ void setup() {
   tft.init();
   tft.setRotation(1);                     // 横屏：160×128
   tft.fillScreen(C_BG);
+
+  // 中文字体渲染器绑定屏幕。透明模式（1）：只画字形像素，不铺背景色块
+  u8f.begin(tft);
+  u8f.setFontMode(1);
+  u8f.setFontDirection(0);
 
   // 开机自检画面，也能用来确认屏幕方向和颜色是否正常
   drawCentered("VibePet", 44, 3, TFT_WHITE);

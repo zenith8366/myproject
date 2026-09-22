@@ -228,6 +228,7 @@ try:
     class RecordingTransport:
         def __init__(self):
             self.sent = []
+            self.connected_flag = True   # 用例 10/11 通过它模拟掉线 / 重连
             self._line_handler = None
 
         def set_line_handler(self, handler):
@@ -235,7 +236,7 @@ try:
 
         @property
         def connected(self):
-            return True
+            return self.connected_flag
 
         async def ensure_connected(self):
             return True
@@ -303,6 +304,110 @@ try:
         except Exception as exc:
             problems.append(f"hook_client 输出异常 ({exc}): {proc.stdout!r}")
     record("端到端 hook_client -> daemon -> 按钮", problems)
+
+    # —— 用例 9：UTF-8 边界安全截断（clamp_bytes）——
+    # 固件 LINE_MAX=512，单字段必须按「字节」而非「字符」限长：
+    # 60 个汉字 = 180 字节是合法的，而按字符截断会放任它涨到 265 字节。
+    problems = []
+    try:
+        from bridge_daemon import clamp_bytes
+    except ImportError as exc:
+        problems.append(f"clamp_bytes 尚未实现: {exc}")
+    else:
+        if clamp_bytes("abc", 240) != "abc" or clamp_bytes("", 240) != "":
+            problems.append("未超限的短串被改动")
+        sixty = "中" * 60                       # 180 字节：应原样通过
+        if clamp_bytes(sixty, 240) != sixty:
+            problems.append("60 汉字（180 字节）不应被截断")
+        long_cn = clamp_bytes("汉" * 100, 240)  # 300 -> 240 字节（80 字）
+        if len(long_cn.encode("utf-8")) > 240 or long_cn != "汉" * 80:
+            problems.append(
+                f"3 字节字符截断有误: {len(long_cn.encode('utf-8'))} 字节 / 尾字符 {long_cn[-3:]!r}")
+        emo = clamp_bytes("😀" * 100, 240)      # 400 -> 240 字节（60 个 4 字节字符）
+        if len(emo.encode("utf-8")) > 240 or emo != "😀" * 60:
+            problems.append(f"4 字节字符截断有误: {len(emo.encode('utf-8'))} 字节")
+        odd = clamp_bytes("汉" * 100, 241)      # 边界落在第 81 个字中间
+        if len(odd.encode("utf-8")) > 241 or odd != "汉" * 80:
+            problems.append(f"非整除边界截断有误: {len(odd.encode('utf-8'))} 字节")
+    record("UTF-8 边界安全截断（clamp_bytes）", problems)
+
+    # —— 用例 10：断线重连补发与审批参数生命周期 ——
+    # 场景：审批结束的收尾 state 发送失败 / 审批进行中 BLE 断开重连。
+    # 屏幕不能卡在 APPROVE?，也不能停在 LOST —— 重连后必须由 daemon 补发。
+    async def drive_resend():
+        transport = RecordingTransport()      # connected 可通过 connected_flag 切换
+        bridge = Bridge(transport, 1.0)
+        await bridge.send_state("working", "A")
+
+        # 发送失败（BLE 已断）：屏幕内容变得未知，重连后必须原样补发
+        transport.connected_flag = False
+        try:
+            await bridge.send_state("done", "D")
+        except ConnectionError:
+            pass
+        transport.connected_flag = True
+        await bridge.resend_current()
+        resent = transport.sent[-1]
+
+        # handle_approval 期间应保存审批参数，结束后清空
+        task = asyncio.create_task(bridge.handle_approval(
+            {"tool_name": "Bash", "tool_input": {"command": "echo hi"}}))
+        await asyncio.sleep(0.05)
+        saved = bridge._pending_approval
+        rid = bridge._pending_request_id
+        bridge.inject_button({"type": "button", "request_id": rid, "action": "approve"})
+        await task
+        cleared = bridge._pending_approval
+
+        # 审批进行中重连：重发审批卡，request_id 必须与原来一致（否则设备回传对不上）
+        bridge._pending_approval = {"request_id": "rid9", "tool": "Bash", "summary": "摘要9"}
+        await bridge.resend_current()
+        return resent, saved, rid, cleared, transport.sent[-1]
+
+    problems = []
+    try:
+        resent, saved, rid, cleared, appr = asyncio.run(drive_resend())
+        if (resent.get("type"), resent.get("status"), resent.get("msg")) != ("state", "done", "D"):
+            problems.append(f"重连后未补发最后状态: {resent}")
+        if not saved or saved.get("request_id") != rid:
+            problems.append(f"审批参数未保存: saved={saved} rid={rid}")
+        if cleared is not None:
+            problems.append(f"审批结束后 _pending_approval 未清空: {cleared}")
+        if (appr.get("type"), appr.get("request_id")) != ("approval_request", "rid9"):
+            problems.append(f"审批中重连未重发审批卡: {appr}")
+    except Exception as exc:
+        problems.append(f"补发流程异常: {exc!r}")
+    record("断线重连补发 + 审批参数生命周期", problems)
+
+    # —— 用例 11：connection_loop 重连成功后自动补发 ——
+    # 这是「重连后屏幕自己切回去」的电脑端那一半：补发动作要挂在重连成功点上。
+    async def drive_loop():
+        class FlakyTransport(RecordingTransport):
+            async def ensure_connected(self):
+                self.connected_flag = True
+                return True
+
+        transport = FlakyTransport()
+        bridge = Bridge(transport, 1.0)
+        await bridge.send_state("working", "A")   # 断线前的最后状态
+        transport.connected_flag = False          # 模拟掉线
+        task = asyncio.create_task(bridge.connection_loop())
+        await asyncio.sleep(0.2)                  # 让第一轮「重连 + 补发」跑完
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return [(m.get("type"), m.get("status"), m.get("msg")) for m in transport.sent]
+
+    problems = []
+    try:
+        kinds = asyncio.run(drive_loop())
+        if kinds.count(("state", "working", "A")) != 2:
+            problems.append(f"重连后应补发一次最后状态（同内容共 2 条），实际: {kinds}")
+    except Exception as exc:
+        problems.append(f"connection_loop 补发异常: {exc!r}")
+    record("connection_loop 重连后自动补发", problems)
 
 finally:
     daemon_proc.terminate()

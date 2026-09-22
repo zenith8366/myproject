@@ -56,6 +56,9 @@ RECONNECT_DELAY = 2.0      # 断线后重连间隔
 SCAN_TIMEOUT = 5.0         # BLE 扫描窗口
 REQUEST_TIMEOUT = 10.0     # 本地请求的读取超时（与审批等待无关）
 SUMMARY_MAX_LEN = 60       # 命令摘要长度上限（设计文档 5.5）
+MAX_FIELD_BYTES = 240      # 单字段（summary/msg）字节上限。固件整行上限 LINE_MAX=512，
+                           # 整行固定开销约 85 字节；60 个汉字 = 180 字节，按字节限长
+                           # 才能保证整行不被设备端整条丢弃（对方按字节数收行）。
 
 _VERBOSE = False
 
@@ -199,7 +202,15 @@ class Bridge:
         self._pending_request_id = None
         self._button_action = None
         self._button_event = asyncio.Event()
-        self._last_state = None  # 设备当前显示的状态，用于抑制重复刷新
+        # 设备「应当」显示的 state（记账：最近一次下发的 (status, msg)，
+        # 不论发送成败），用于抑制重复刷新。
+        self._last_state = None
+        # True = 设备实际显示可能不是 _last_state：发送失败、屏幕被审批卡占据、
+        # 或刚重连（屏幕停在 LOST / 设备本地恢复的旧状态）。
+        self._state_dirty = False
+        # 审批进行中的完整参数。BLE 中断重连后用它重发审批卡，且必须沿用
+        # 原 request_id，否则设备回传的按钮对不上（F8）。
+        self._pending_approval = None
         # F9：同一时间只处理一个审批请求。并发调用在 handle_approval 里排队，
         # 否则 _pending_request_id 这个单槽会被第二个请求覆盖，
         # 第一个请求就会永远等不到匹配的按钮，直到超时。
@@ -252,25 +263,45 @@ class Bridge:
         """发送状态。与设备当前显示完全相同时跳过 —— 每条状态都会让固件全屏
         重绘（设计文档 5.5 的 draw* 全是 fillScreen），而 PostToolUse 会把同一个
         working 反复上报，不去重就是每秒闪好几次。
+
+        去重键记的是「设备应显示的内容」而非「已确认送达的内容」：发送失败时
+        仍记账并保留 _state_dirty，重连补发靠它拿回正确的一条。
         """
+        msg = clamp_bytes(msg, MAX_FIELD_BYTES)
         key = (status, msg)
-        if key == self._last_state:
+        if key == self._last_state and not self._state_dirty:
             debug(f"状态与当前显示相同，跳过: {status} / {msg!r}")
             return
+        self._last_state = key        # 先记账，再尝试送达
+        self._state_dirty = True
         await self._send({"type": "state", "status": status, "msg": msg})
-        self._last_state = key
+        self._state_dirty = False
 
     async def send_approval_request(self, request_id, tool, summary):
         await self._send({
             "type": "approval_request",
             "request_id": request_id,
             "tool": tool,
-            "summary": summary,
+            "summary": clamp_bytes(summary, MAX_FIELD_BYTES),
         })
-        # 设备此刻显示的是审批卡而非 state。必须同步标记，否则审批结束后
-        # 发回 working 会被去重逻辑误判成「与上次相同」而静默丢弃，
-        # 屏幕就永远卡在 APPROVE? 了。
-        self._last_state = ("needs_you", summary)
+        # 设备此刻显示的是审批卡而非任何 state。标记屏幕内容与 _last_state
+        # 不符，否则审批结束后发回 working 会被去重逻辑误判成「与上次相同」
+        # 而静默丢弃，屏幕就永远卡在 APPROVE? 了。
+        self._state_dirty = True
+
+    async def resend_current(self):
+        """刚重连上时调用：把设备屏幕应有的内容补发一份。
+
+        失联期间设备显示 LOST（心跳恢复后本地会切回最后有效状态），实际
+        显示已不可知 —— 所以补发一律绕过去重（置 _state_dirty）。审批进行中
+        则重发审批卡，并沿用原 request_id，设备回传的按钮才仍然有效（F8）。
+        """
+        if self._pending_approval is not None:
+            await self.send_approval_request(**self._pending_approval)
+            return
+        if self._last_state is not None:
+            self._state_dirty = True
+            await self.send_state(*self._last_state)
 
     async def wait_for_button(self, request_id, timeout):
         """阻塞等待匹配 request_id 的按钮；超时返回 deny（设计文档 5.4）。"""
@@ -298,22 +329,36 @@ class Bridge:
                 log(f"BLE 未连接，审批降级为 deny（tool={tool_name}）")
                 return {"action": "deny"}
 
+            # 先占槽再发送：按钮校验只认槽里的 request_id，若等 wait_for_button
+            # 才写入，请求已发出而槽还空着的窗口里按钮会被误判为「无待审批」丢弃。
+            self._pending_request_id = request_id
+            self._pending_approval = {
+                "request_id": request_id,
+                "tool": tool_name,
+                "summary": summary,
+            }
             try:
                 await self.send_approval_request(request_id, tool_name, summary)
             except Exception as exc:
+                self._pending_request_id = None
+                self._pending_approval = None
                 log(f"审批请求发送失败，降级为 deny: {exc}")
                 return {"action": "deny"}
 
             log(f"等待按钮: tool={tool_name} request_id={request_id} summary={summary!r}")
-            action = await self.wait_for_button(request_id, self.approval_timeout)
+            try:
+                action = await self.wait_for_button(request_id, self.approval_timeout)
+            finally:
+                self._pending_approval = None
             log(f"审批结果: {action} (request_id={request_id})")
 
             # 让屏幕脱离 APPROVE? 的滞留状态。完整的「事件 → 状态」映射
             # （done / error 等）不在本文件范围内，这里只闭合审批流程。
+            # 发送失败不致命：_state_dirty 已置位，重连后 resend_current 会补发。
             try:
                 await self.send_state("working" if action == "approve" else "idle")
-            except Exception:
-                pass
+            except Exception as exc:
+                log(f"审批后状态发送失败（重连后将补发）: {exc}")
 
             return {"action": action}
 
@@ -348,7 +393,13 @@ class Bridge:
         while True:
             if not self.transport.connected:
                 try:
-                    await self.transport.ensure_connected()
+                    if await self.transport.ensure_connected():
+                        # 刚从断开变为连上：设备屏幕还停在 LOST（或它本地恢复的
+                        # 旧状态），把「现在应该显示什么」重新推过去。
+                        try:
+                            await self.resend_current()
+                        except Exception as exc:
+                            log(f"重连后补发状态失败: {exc}")
                     last_error = None
                 except Exception as exc:
                     message = format_error(exc)
@@ -363,6 +414,19 @@ class Bridge:
 # —————————————————————————— 摘要提取 ——————————————————————————
 
 
+def clamp_bytes(text, max_bytes):
+    """按 UTF-8 边界把文本截到不超过 max_bytes 字节。
+
+    设备的行长上限按「字节」计（固件 LINE_MAX），而 Python 切片按码点：
+    一个汉字 3 字节，只按字符数限长会放任整行超限、被设备整条丢弃。
+    errors="ignore" 恰好丢掉落在边界上的半个多字节字符，不会切出乱码。
+    """
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def collapse(text):
     """折掉换行与连续空白 —— 屏幕上只有一行位置，多行摘要会溢出。"""
     return " ".join(str(text).split())
@@ -375,14 +439,14 @@ def summarize(tool_input):
     都没有就退化成整个 tool_input 的字符串形式。
     """
     if not isinstance(tool_input, dict):
-        return collapse(tool_input)[:SUMMARY_MAX_LEN]
+        return clamp_bytes(collapse(tool_input)[:SUMMARY_MAX_LEN], MAX_FIELD_BYTES)
 
     for key in ("command", "file_path", "path", "pattern", "url", "query"):
         value = tool_input.get(key)
         if isinstance(value, str) and value.strip():
-            return collapse(value)[:SUMMARY_MAX_LEN]
+            return clamp_bytes(collapse(value)[:SUMMARY_MAX_LEN], MAX_FIELD_BYTES)
 
-    return collapse(tool_input)[:SUMMARY_MAX_LEN]
+    return clamp_bytes(collapse(tool_input)[:SUMMARY_MAX_LEN], MAX_FIELD_BYTES)
 
 
 # —————————————————————————— 本地 Socket 服务 ——————————————————————————
