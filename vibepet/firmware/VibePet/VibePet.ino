@@ -68,6 +68,7 @@
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
 #include <TFT_eSPI.h>
+#include <SPI.h>              // 显式初始化 SPI 总线要用（见 setup() 里点亮屏幕那一段）
 #include <U8g2_for_TFT_eSPI.h>
 #include <math.h>
 
@@ -812,6 +813,25 @@ void setup() {
   digitalWrite(PIN_LED_STATUS, LOW);      // 指示灯先灭着
 
   // ── 点亮屏幕 ──
+  // 下面这一串借自 test-firmware/tfttest_esp32c3 —— 那份代码在本机实测点亮过
+  // 屏幕，而直接调 tft.init() 会白屏。三个要点，缺一不可：
+  //
+  //   ① 上电后先等 300 ms，让屏幕电源稳定（那份代码的注释标着「关键！」）。
+  //   ② 手动做一次硬复位。TFT_eSPI 自己也会拉 RST，但时序依赖上电时的电平
+  //      状态；先手动复位一遍，能确保屏幕从确定的状态开始初始化。
+  //   ③ 显式先调一次 SPI.begin()。这一步不只是「更稳」——TFT_eSPI 内部那次
+  //      spi.begin() 在 ESP32-C3 上会把 MISO 也设成 MOSI 所在的那个引脚，
+  //      导致 MOSI 挂载失败、SPI 一个字节都发不出去。先把总线初始化好，
+  //      就能绕开那条有问题的调用路径。
+  //      （详见 vendor/TFT_eSPI/Processors/TFT_eSPI_ESP32_C3.h 里的说明）
+  delay(300);
+  pinMode(TFT_RST, OUTPUT);
+  digitalWrite(TFT_RST, LOW);
+  delay(20);
+  digitalWrite(TFT_RST, HIGH);
+  delay(120);
+  SPI.begin(TFT_SCLK, -1, TFT_MOSI, -1);
+
   tft.init();
   tft.setRotation(1);                     // 横屏：160×128
   tft.fillScreen(C_BG);

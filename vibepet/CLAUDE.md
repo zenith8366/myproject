@@ -13,11 +13,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 这份文档是**唯一权威规格**，涵盖需求、硬件选型与接线、通信协议、软件模块划分、示例代码、开发计划、测试方案与风险分析。开始任何实现前先读它。本文件只提炼跨章节阅读才能得出的约定，不替代文档；两者冲突时以设计文档为准。
 
-- `firmware/VibePet/VibePet.ino` —— ESP32-C3 固件（881 行，其中约三分之一是面向新手的注释）。**已通过编译验证**（`esp32:esp32` 3.3.11，零警告）
-- `firmware/TFT_eSPI_User_Setup.h` —— TFT_eSPI 配置模板。**它不是编译单元**，是给库的 `User_Setup.h` 覆盖用的
+- `firmware/VibePet/VibePet.ino` —— ESP32-C3 固件（约 900 行，其中约三分之一是面向新手的注释）。**已通过编译验证并在真机上跑通了蓝牙链路**（`esp32:esp32` 3.3.11，零警告）
+- `vendor/TFT_eSPI/` —— **仓库自带的 TFT_eSPI 2.5.43 副本（已修正）**。上游版在 ESP32 核心 3.x 上有两处致命兼容性问题，必须改库源码才能用，所以整份自带进仓库改好。**编译必须带 `--libraries vendor`**（见「常用命令」）。**不要改 Arduino 库目录里那份** —— 改了无效（`--libraries` 优先），而且重装库或换电脑就丢
+- `firmware/TFT_eSPI_User_Setup.h` —— TFT 配置的**可读参考**，不是编译单元。实际生效的是 `vendor/TFT_eSPI/User_Setup.h`
+- `test-firmware/` —— 硬件排查用的独立探针固件，与主固件无关，可随时删
 - `.claude/settings.json` —— Claude Code Hook 配置，挂在 6 个事件上，但**当前 6 处 command 全部以 `#` 注释着，不会生效**。启用方式与冲突提醒见 `.claude/README.md`
 
-**固件尚未在真实硬件上验证**（没有设备）。已确认的只有：能编译、Flash 占用 27%（Huge APP 分区，含约 200 KB 中文点阵字库）、协议字面量与电脑端逐一对齐、用到的 TFT_eSPI / U8g2_for_TFT_eSPI API 签名正确。**未确认**：TFT 初始化序列是否匹配你的模块（`ST7735_INITB` 可能需要换）、接线与引脚、真实 BLE 行为、屏幕布局与中文渲染的实际观感（wqy12 行高约 15px，摘要行数与坐标按此估算，上机后可能需微调）。
+**真机验证进度（2026-09-23）**：已确认能编译（Flash 27%，Huge APP 分区）、能烧录、`setup()` 完整跑完（串口打出「就绪」）、BLE 广播名 `VibePet` 与 NUS 服务均正常、电脑端能扫到并连接。**尚未确认**：屏幕显示（当前现象是**背光亮但无画面**；已排除软件因素 —— 两套互不相干的库、两套引脚组合、两档 SPI 速度都白屏，且 `tft.init()` 能正常返回，判定为接线 / 模块的物理问题）、按钮与蜂鸣器、屏幕布局与中文渲染的实际观感（wqy12 行高约 15px，摘要行数与坐标按此估算，上机后可能需微调）。
 
 **设计文档 5.5 节的示例代码是示意片段，不是可用实现，不要照抄**：daemon 部分缺断线重连、并发保护（F9 单槽会被第二个请求覆盖）与审批后状态复位（屏幕会永远停在 `APPROVE?`）；hook_client 部分缺 socket 超时（会让 Claude Code 永久卡死）、半关闭（与 daemon 的 `reader.read()` 互等死锁）和 UTF-8 处理。
 
@@ -33,14 +35,28 @@ python pc/_smoke_test_state.py     # 事件 → 状态映射：14 例
 python -m py_compile pc/hook_client.py pc/bridge_daemon.py
 
 # 编译固件（用 D 盘 Arduino IDE 自带的 cli；路径含空格必须加引号）
-# FQBN 必须带 PartitionScheme=huge_app：中文点阵字库约 200 KB，默认分区放不下
+# 编译 + 烧录（COM 口号换成你实际的，用 arduino-cli board list 可查）
+# ── 两个参数都不能少 ──
+#   PartitionScheme=huge_app  中文点阵字库约 200 KB，默认分区放不下
+#   CDCOnBoot=cdc             原生 USB 串口，日志才能从 USB 出来
+#   --libraries vendor        ★ 关键：用仓库自带的 TFT_eSPI 副本，
+#                             而不是 Arduino 库目录里那份未修正的
 CLI="/d/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
-"$CLI" compile --fqbn "esp32:esp32:esp32c3:PartitionScheme=huge_app" \
-  --build-property 'compiler.cpp.extra_flags=-DUSER_SETUP_LOADED=1 -DST7735_DRIVER -DTFT_WIDTH=128 -DTFT_HEIGHT=160 -DTFT_CS=7 -DTFT_DC=8 -DTFT_RST=5 -DTFT_MOSI=6 -DTFT_SCLK=4 -DLOAD_GLCD -DSPI_FREQUENCY=27000000 -DST7735_INITB' \
-  firmware/VibePet
+"$CLI" compile --fqbn "esp32:esp32:esp32c3:PartitionScheme=huge_app,CDCOnBoot=cdc" \
+  --libraries vendor --upload -p COM8 firmware/VibePet
 
-# 烧录（COM 口号换成你实际的）
-"$CLI" upload --fqbn "esp32:esp32:esp32c3:PartitionScheme=huge_app" -p COM3 firmware/VibePet
+# 只编译不烧录
+"$CLI" compile --fqbn "esp32:esp32:esp32c3:PartitionScheme=huge_app,CDCOnBoot=cdc" \
+  --libraries vendor firmware/VibePet
+
+# ── 为什么必须带 --libraries vendor ──
+# TFT_eSPI 2.5.43 在 ESP32 核心 3.x（ESP-IDF 5.x）上有两处兼容性问题，会让固件
+# 直接跑不起来（详见 vendor/TFT_eSPI/Processors/TFT_eSPI_ESP32_C3.h 的注释）：
+#   1. REG_SPI_BASE 被核心的兼容垫片顶掉 → 寄存器指针落到 0x10 → 启动即崩溃重启
+#   2. TFT_MISO 被强制设成 TFT_MOSI → 两信号撞同一 GPIO → SPI 发不出数据 → 卡死
+# 所以 TFT_eSPI 整份自带在 vendor/ 下并已修好。**改动 TFT 引脚或屏幕参数请改
+# vendor/TFT_eSPI/User_Setup.h**，不要去改 Arduino 库目录里那份（改那里无效，
+# 因为 --libraries 优先，而且重装库就丢）。
 
 # 无硬件手动联调：--no-ble 模式下按钮事件改由本地 Socket 注入
 python pc/bridge_daemon.py --no-ble        # 终端 A
@@ -172,7 +188,7 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 | TFT CS | 7 | ST7735S 片选 |
 | TFT SDA/MOSI | 6 | |
 | TFT SCK | 4 | |
-| TFT A0/DC/RS | 8 | |
+| TFT A0/DC/RS | **0** | 2026-09-23 从 GPIO8 改到这里，理由见下方 |
 | TFT RES | 5 | |
 | 批准按钮 | 1 | `INPUT_PULLUP`，按下为 LOW |
 | 拒绝按钮 | 10 | `INPUT_PULLUP`，按下为 LOW |
@@ -180,6 +196,8 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 | LED 指示灯 | 2 | BLE 连接状态 |
 
 **引脚选择本身就带避坑意图，不要随意更换**：GPIO9 是 ESP32-C3 的启动引脚，必须避开；按钮接 `INPUT_PULLUP` 且选中上述引脚，是为了保证按住按钮上电时设备仍能正常启动、不误入下载模式（设计文档 4.3 的引脚确认表要求实测这一点，7.2 有对应用例）。
+
+**TFT 的 A0/DC/RS 用 GPIO0 而不是 GPIO8**：ESP32-C3 的 strapping（启动模式）脚是 GPIO2 / 8 / 9，能不被外设占用就不占。原来的 GPIO8 换成了普通脚 GPIO0；GPIO2 仍留给状态 LED（与设计文档一致，实测可正常启动）。GPIO0 在 C3 上不参与启动模式选择，可以安全使用。
 
 **完整接线**（每个元件的第二根线接哪、接线顺序、上电前检查清单）见**设计文档 4.7**；上面这张表只列 GPIO 分配，给人快速查阅用。4.7 是接线的唯一权威，改引脚时以它为准。
 
@@ -203,13 +221,13 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 | ESP32 核心 | **`esp32:esp32` 3.3.11**（实测版本；设计文档写的 ≥3.0 是底线） |
 | BLE 库 | **NimBLE-Arduino 2.5.1**（而非 ESP32 原生 BLE 库，省 RAM 与 Flash）。2.x 的回调签名带 `NimBLEConnInfo&` 参数，写成 1.x 的 `onConnect(NimBLEServer*)` 会编译失败 |
 | 中文字体 | **U8g2 2.36.19 + U8g2_for_TFT_eSPI 1.7.0** —— 正文用 `u8g2_font_wqy12_t_gb2312`（约 200 KB Flash）。U8g2_for_TFT_eSPI 不在库管理器索引里，需 `git clone https://github.com/Bodmer/U8g2_for_TFT_eSPI` 到 libraries 目录 |
-| TFT 驱动 | TFT_eSPI 2.5.43（Bodmer 版），实际位于 `E:\Users\lyh35\Documents\Arduino\libraries` —— **库目录在 E 盘不是 C 盘**，找库时别找错 |
+| TFT 驱动 | **`vendor/TFT_eSPI/`（仓库自带的 2.5.43 副本，已修正两处核心 3.x 兼容问题）** —— 编译时用 `--libraries vendor` 指向它。Arduino 库目录（`E:\Users\lyh35\Documents\Arduino\libraries`，**在 E 盘不是 C 盘**）里那份**保持原样、不要改**，因为改了也不生效 |
 | JSON 库 | ArduinoJson **7.4.3**（设计文档写的是 v6，实测 v7 亦可）。注意 v7 里 `StaticJsonDocument<N>` 只是 `JsonDocument` 的兼容壳：**池是动态的**（堆分配、按需增长），`<N>` 既不限制也不预留内存 —— 与 v6 的「栈上定长池」语义不同，别指望它兜住内存上限；真正的上限由协议保证（整行 ≤ 512 字节） |
 | 电脑端 | Python ≥ 3.9 + `bleak` 3.0.2 + `asyncio` |
 
 Arduino IDE 关键配置（改动后需重新确认，并备份 TFT_eSPI 的 `User_Setup.h`）：开发板 `ESP32C3 Dev Module`、USB CDC On Boot `Enabled`、Partition Scheme `Huge APP (3MB No OTA/1MB SPIFFS)`、Flash Size `4MB`、Upload Speed `921600`。
 
-TFT 引脚不走代码 `#define`，而是在 TFT_eSPI 的 `User_Setup.h` 中配置（选 `ST7735_DRIVER`、分辨率 128×160；初始化序列 `ST7735_INITB` / `ST7735_GREENTAB` 等因厂商而异，须按实际模块实测）——排障屏幕不亮时优先查这里。
+TFT 引脚不走代码 `#define`，而是在 TFT_eSPI 的 `User_Setup.h` 中配置 —— **本项目改的是 `vendor/TFT_eSPI/User_Setup.h`**（不是 Arduino 库目录里那份）。当前值：`ST7735_DRIVER`、分辨率 128×160、初始化序列 `ST7735_BLACKTAB`（依据本机实测成功的 `test-firmware/tfttest_esp32c3` 选定）。初始化序列因厂商而异，画面花屏/偏色/偏移时换那一行逐个试。排障屏幕不亮时优先查这里。
 
 ## 调试顺序
 

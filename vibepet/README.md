@@ -73,7 +73,7 @@ daemon 重连后还会把当前状态重新推一份（屏幕不用手动重启�
 | | CS | GPIO 7 |
 | | SDA（部分模块标 MOSI） | GPIO 6 |
 | | SCK（部分模块标 SCL） | GPIO 4 |
-| | A0（部分模块标 DC 或 RS） | GPIO 8 |
+| | A0（部分模块标 DC 或 RS） | **GPIO 0** |
 | | RES（部分模块标 RST） | GPIO 5 |
 | | LED（部分模块标 BL 或 LEDA） | 3.3V（背光常亮） |
 | 批准按钮 | 一个脚 | GPIO 1 |
@@ -85,7 +85,7 @@ daemon 重连后还会把当前状态重新推一份（屏幕不用手动重启�
 | 状态 LED | 长脚（正极） | 先串 220 Ω 电阻，再入 GPIO 2 |
 | | 短脚（负极） | GND |
 
-> **丝印对不上就查这里**：`RS` / `A0` / `DC` 是同一根脚（数据/命令切换），接 GPIO 8；`LEDA` / `BL` / `LED` 也是同一根脚（背光正极），接 3.3V。别当成两根线去找。
+> **丝印对不上就查这里**：`RS` / `A0` / `DC` 是同一根脚（数据/命令切换），接 **GPIO 0**；`LEDA` / `BL` / `LED` 也是同一根脚（背光正极），接 3.3V。别当成两根线去找。
 
 ```text
   ESP32-C3 SuperMini          1.77" ST7735S TFT
@@ -95,7 +95,7 @@ daemon 重连后还会把当前状态重新推一份（屏幕不用手动重启�
      GP7 ────────────────────── CS
      GP6 ────────────────────── SDA (MOSI)
      GP4 ────────────────────── SCK
-     GP8 ────────────────────── A0 (DC/RS)
+     GP0 ────────────────────── A0 (DC/RS)
      GP5 ────────────────────── RES
      3V3 ────────────────────── LED / LEDA（背光，常亮）
 
@@ -107,7 +107,7 @@ daemon 重连后还会把当前状态重新推一份（屏幕不用手动重启�
      GP2 ──── 220Ω ── LED ───── GND
 ```
 
-**GPIO 9 上什么都不要接** —— 那是芯片的启动模式脚，接上外设会开不了机。GPIO 18/19（USB）与 20/21（串口）同样留空。
+**GPIO 8 和 GPIO 9 上什么都不要接** —— 这两根都是芯片的启动模式（strapping）脚，接上外设会让设备开不了机或误入下载模式。GPIO 18/19（USB）与 20/21（串口）同样留空。
 
 **接线顺序**（每步都能单独验证，别一次接完再上电）：
 
@@ -121,12 +121,12 @@ daemon 重连后还会把当前状态重新推一份（屏幕不用手动重启�
 | 症状 | 多半是这个原因 |
 |---|---|
 | 屏幕完全不亮 | VCC / GND 没接上，或背光的 LED 脚忘了接 3.3V |
-| 花屏、偏色、显示区域偏一格 | **不是接线问题**，是屏幕初始化序列不匹配 → 按「配置 TFT_eSPI」一节换 `ST7735_INITB` 那一行 |
-| 屏幕亮着但一片空白 | RES 或 CS 没接好 |
+| 花屏、偏色、显示区域偏一格 | **不是接线问题**，是屏幕初始化序列不匹配 → 换 `vendor/TFT_eSPI/User_Setup.h` 里的 `ST7735_BLACKTAB` 那一行 |
+| 屏幕亮着但一片空白 | RES 或 CS 没接好；也可能是数据线接触不良，把 5 根信号线两头都重新插实 |
 | 按按钮没反应 | 微动开关跨错了脚（接成同侧两脚 = 一直处于按下状态），或没接 GND |
 | 蜂鸣器只「咔哒」一声 | 装的是**有源**蜂鸣器。本项目按无源驱动，把固件里的 `BUZZER_ACTIVE` 改成 `1` |
-| 插上 USB 没反应、找不到串口 | 有东西接到了 GPIO 9 / 18 / 19 / 20 / 21 |
-| 板上小蓝灯一直闪 | 部分批次的 SuperMini 板载 LED 就在 GPIO 8，而 GPIO 8 给了屏幕的 DC 脚——正常现象 |
+| 插上 USB 没反应、找不到串口 | 有东西接到了 GPIO 8 / 9 / 18 / 19 / 20 / 21 |
+| 板上小蓝灯一直闪 | 部分批次的 SuperMini 板载 LED 焊在 GPIO 8 上，不受固件控制、上电就亮——正常现象。（这也是本方案把屏幕 DC 从 GPIO 8 挪到 GPIO 0 的原因之一：板载 LED 会给那根脚加负载） |
 
 引脚分配的依据、电气注意事项和完整的上电前检查清单见[设计文档](VibePet%20——%20AI%20编程助手物理状态显示与审批终端（无线%20BLE%20版）v2.0.md)的 **4.7 完整接线指南**。
 
@@ -166,46 +166,60 @@ https://espressif.github.io/arduino-esp32/package_esp32_index.json
 装了中文字库（文泉驿点阵宋体，覆盖 GB2312）后，屏幕上的中文摘要是正常汉字，
 不再是问号。
 
-**3. 配置 TFT_eSPI**
+**3. TFT_eSPI 不用你配了 —— 仓库自带了一份修好的**
 
-TFT_eSPI 的引脚和屏幕参数**不在代码里**，而在库自己的 `User_Setup.h` 中。把本项目的
-`firmware/TFT_eSPI_User_Setup.h` 内容整体复制过去覆盖它（**覆盖前先备份原文件**）。
+TFT_eSPI 的引脚和屏幕参数不在代码里，而在库自己的 `User_Setup.h` 中。本项目**自带一份
+修好的 TFT_eSPI**，放在 `vendor/TFT_eSPI/`，编译时用 `--libraries vendor` 指向它即可。
+**不需要去动 Arduino 库目录里的那份**（改了也不生效，`--libraries` 优先）。
 
-库文件位置：`我的文档/Arduino/libraries/TFT_eSPI/User_Setup.h`
+> **为什么自带？** 上游 TFT_eSPI 2.5.43 与 ESP32 核心 3.x（ESP-IDF 5.x）有两处致命的
+> 不兼容，会让固件一启动就崩溃重启、或卡死在 `tft.init()` 里（屏幕白屏、蓝牙起不来）。
+> 这两处必须在库源码里修，所以整份自带进仓库改好。
+> 详见 `vendor/TFT_eSPI/Processors/TFT_eSPI_ESP32_C3.h` 的注释。
 
 > ⚠️ 不同厂商的 1.77" 模块出厂初始化参数不同。烧录后若出现花屏、偏色或显示区域
-> 偏移一格，改模板里的 `ST7735_INITB` 那一行，依次换 `ST7735_GREENTAB`、
-> `ST7735_BLACKTAB` 等逐个试，直到画面正常。
+> 偏移一格，改 `vendor/TFT_eSPI/User_Setup.h` 里的 `ST7735_BLACKTAB` 那一行，
+> 依次换 `ST7735_INITB`、`ST7735_GREENTAB` 等逐个试，直到画面正常。
 
-**4. 开发板设置**（工具菜单）
+**4. 编译并烧录（必须用命令行）**
 
-| 项目 | 值 |
+> ⚠️ **这一步不能用 Arduino IDE 的「上传」按钮。** IDE 不会带 `--libraries` 参数，
+> 会去用 Arduino 库目录里那份**未修正的** TFT_eSPI，固件会崩溃重启。
+> 请用下面的命令行 —— 复制粘贴即可，和点按钮差不了几秒。
+
+打开终端，切到项目根目录（`E:\myproject\vibepet`），然后：
+
+```bash
+# Arduino IDE 自带的 arduino-cli（路径含空格，引号不能省）
+CLI="/d/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
+
+# 查看板子占用的串口（一般是 COM3~COM8 里那个「USB 串行设备」）
+"$CLI" board list
+
+# 编译 + 烧录（把 COM8 换成你实际的）
+"$CLI" compile \
+  --fqbn "esp32:esp32:esp32c3:PartitionScheme=huge_app,CDCOnBoot=cdc" \
+  --libraries vendor --upload -p COM8 firmware/VibePet
+```
+
+两个关键参数：
+
+| 参数 | 作用 |
 |---|---|
-| 开发板 | ESP32C3 Dev Module |
-| USB CDC On Boot | Enabled |
-| Flash Size | 4MB |
-| Partition Scheme | Huge APP (3MB No OTA/1MB SPIFFS) |
-| Upload Speed | 921600 |
+| `--libraries vendor` | **★ 必须带**。让编译器用仓库自带那份修好的 TFT_eSPI |
+| `PartitionScheme=huge_app` | 中文点阵字库约 200 KB，默认分区放不下 |
+| `CDCOnBoot=cdc` | 原生 USB 串口，串口日志才能从 USB 出来 |
 
-**5. 上传**
+这条命令已实测通过（占用 Flash 27%，零警告）。插上 USB 线（要能传数据的线）后运行；
+若提示找不到串口，按住板载 BOOT 键再插一次 USB。
 
-插上 USB 线（要能传数据的线）点上传。若提示找不到串口，按住板载 BOOT 键再插一次 USB。
+> 想在 Arduino IDE 里看代码、改代码完全没问题，只是**烧录这一步走命令行**。
+> 如果以后想在 IDE 里直接点上传，得把 `vendor/TFT_eSPI` 复制进 Arduino 的库目录
+> （`我的文档/Arduino/libraries/`）并把那里原有的 TFT_eSPI 挪走 —— 但那样就又回到
+> 「改 Arduino 库、重装就丢」的老路上了，不建议。
 
 烧录成功后屏幕先显示 `VibePet / starting...`，随后进入 `IDLE`——此时设备已在广播，
 可以进入第二步了。
-
-> 习惯命令行的话，Arduino IDE 自带 arduino-cli，可直接用（注意路径含空格要加引号）。
-> 走命令行时**不必覆盖库的 `User_Setup.h`**，引脚配置改用编译参数注入：
-> ```bash
-> CLI="D:/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
-> "$CLI" compile --fqbn "esp32:esp32:esp32c3:PartitionScheme=huge_app" \
->   --build-property 'compiler.cpp.extra_flags=-DUSER_SETUP_LOADED=1 -DST7735_DRIVER -DTFT_WIDTH=128 -DTFT_HEIGHT=160 -DTFT_CS=7 -DTFT_DC=8 -DTFT_RST=5 -DTFT_MOSI=6 -DTFT_SCLK=4 -DLOAD_GLCD -DSPI_FREQUENCY=27000000 -DST7735_INITB' \
->   firmware/VibePet
-> "$CLI" upload --fqbn "esp32:esp32:esp32c3:PartitionScheme=huge_app" -p COM3 firmware/VibePet
-> ```
-> 上面这条命令已实测通过（占用 Flash 27%，零警告）。中文点阵字库约 200 KB，
-> 所以 FQBN 里必须带 `PartitionScheme=huge_app`——用默认分区会放不下。如果你的
-> 模块不是 INITB 序列，把末尾的 `-DST7735_INITB` 换成 `-DST7735_GREENTAB` 等再试。
 
 ### 第二步：安装电脑端依赖
 
