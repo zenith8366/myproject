@@ -23,15 +23,15 @@
 #define TFT_HEIGHT 160
 
 // ─────────────────────────── 引脚接线 ───────────────────────────
-// 对应设计文档 4.2 的接线表。ESP32-C3 的 SPI 可以走任意 GPIO（GPIO 矩阵），
+// 对应设计文档 4.7.2 的接线表。ESP32-C3 的 SPI 可以走任意 GPIO（GPIO 矩阵），
 // 所以直接用 TFT_CS / TFT_DC 这种写法，而不是指定 VSPI/HSPI。
 #define TFT_CS   7   // 片选
-#define TFT_DC   8   // 数据/命令切换（模块上标 A0）
+#define TFT_DC   8   // 数据/命令切换（模块上标 A0 / DC / RS 都指这根）
 #define TFT_RST  5   // 复位
 #define TFT_MOSI 6   // 数据（模块上标 SDA）
 #define TFT_SCLK 4   // 时钟
 
-// 背光（模块上的 LED 脚）直接接 3.3V 常亮，不占用 GPIO，因此这里不定义 TFT_BL。
+// 背光（模块上的 LED / BL / LEDA 脚）直接接 3.3V 常亮，不占用 GPIO，因此这里不定义 TFT_BL。
 // ⚠️ 若你的模块背光需要软件控制：本项目的 GPIO 已全部被 TFT / 按钮 / 蜂鸣器 /
 // 状态 LED 占用（见设计文档 4.7 的引脚占用总览）。下面示例曾写 GPIO 3，而
 // GPIO 3 现在是蜂鸣器 —— 照抄会和蜂鸣器抢引脚（两者都用 LEDC），改成空闲脚再用。

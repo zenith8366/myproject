@@ -172,7 +172,7 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 | TFT CS | 7 | ST7735S 片选 |
 | TFT SDA/MOSI | 6 | |
 | TFT SCK | 4 | |
-| TFT A0/DC | 8 | |
+| TFT A0/DC/RS | 8 | |
 | TFT RES | 5 | |
 | 批准按钮 | 1 | `INPUT_PULLUP`，按下为 LOW |
 | 拒绝按钮 | 10 | `INPUT_PULLUP`，按下为 LOW |
