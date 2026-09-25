@@ -6,21 +6,21 @@
 
 它是整个系统的「中间人」—— 一个**常驻**（开着就不关）的程序。为什么需要它？
 
-因为蓝牙有两条硬规矩：
-  · 连接建立很慢，扫描 + 连接要好几秒；
-  · 同一条连接同时只能有一个程序「拿着」。
+因为设备和电脑之间那条串口有两条硬规矩：
+  · 同一个串口同一时刻只能被一个程序「拿着」；
+  · 每次打开串口，开发板都会**复位重启一次**（板载 USB 转串口芯片的设计使然）。
 
 而 Claude Code 那边每发生一件事，就会新起一个短命进程（hook_client.py），
-办完事就退。要是让那种短命进程自己去连蓝牙 —— 每次都得等好几秒，而且几个
-进程还会互相抢连接。所以分工如下：
+办完事就退。要是让那种短命进程自己去开串口 —— 每次都得等板子重启两秒，而且
+几个进程还会互相抢串口。所以分工如下：
 
-    hook_client.py ──本地 Socket──> bridge_daemon.py ──BLE 蓝牙──> ESP32 设备
-     （短命，随叫随到）              （常驻，独占蓝牙）              （桌上的小屏）
+    hook_client.py ──本地 Socket──> bridge_daemon.py ──USB 串口──> UNO 设备
+     （短命，随叫随到）              （常驻，独占串口）              （桌上的小屏）
 
 本进程主要干四件事：
-  1. 独占管理蓝牙连接：找设备、连上、断了自动重连；
+  1. 独占管理串口：找到端口、打开、掉了自动重连；
   2. 每秒给设备发一次「心跳」，让它知道电脑还活着 —— 设备那边 5 秒收不到
-     就显示「失联」，这样蓝牙悄悄断了你也能一眼看出来；
+     就显示「失联」，这样线松了、程序关了，你都能一眼看出来；
   3. 收设备传回来的按钮消息，核对 request_id 之后把决定交还给 hook_client；
   4. 开一个本地端口（127.0.0.1:8765），听 hook_client 来喊话。
 
@@ -32,27 +32,38 @@
 
 ───────────────── 以下为技术细节 ─────────────────
 
-    hook_client.py ──本地 Socket──> bridge_daemon.py ──BLE NUS──> ESP32
+    hook_client.py ──本地 Socket──> bridge_daemon.py ──USB 串口──> UNO R3
                                       （本文件）
 
 职责（设计文档 5.2）：
-  1. 独占管理到 ESP32 的 BLE NUS 连接：扫描 / 连接 / 断线自动重连
+  1. 独占管理到设备的串口连接：发现端口 / 打开 / 断线自动重连
   2. 每秒发送心跳；设备端 5 s 收不到就切「失联」显示
-  3. 接收设备回传的按钮通知，按 request_id 校验后放行决策（F8）
+  3. 接收设备回传的按钮消息，按 request_id 校验后放行决策（F8）
   4. 监听本地 Socket 127.0.0.1:8765，为短生命周期的 hook_client.py 服务
 
 设计文档 5.5 的示例代码缺少重连、并发保护与审批后状态复位，本实现补齐。
 
 用法：
-    python pc/bridge_daemon.py              # 正常模式（需要 bleak 与真实设备）
-    python pc/bridge_daemon.py --no-ble     # 无硬件开发模式：跳过 BLE，仅跑本地 Socket
+    python pc/bridge_daemon.py                      # 正常模式（需要 pyserial 与真实设备）
+    python pc/bridge_daemon.py --serial-port COM7   # 自动找不准端口时手动指定
+    python pc/bridge_daemon.py --no-device          # 无硬件开发模式：跳过串口，仅跑本地 Socket
 
---no-ble 模式下可以不用设备就验证完整审批链路：往 8765 发
+--no-device 模式下可以不用设备就验证完整审批链路：往 8765 发
     {"type":"button","request_id":"<从 status 查询>","action":"approve"}
 即可模拟用户按下物理按钮。
 
-环境变量：VIBEPET_HOST / VIBEPET_PORT / VIBEPET_DEBUG，用法同 hook_client.py。
+环境变量：VIBEPET_HOST / VIBEPET_PORT / VIBEPET_SERIAL_PORT / VIBEPET_DEBUG，
+用法同 hook_client.py。
 """
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import threading
+import time
+import uuid
 
 import argparse
 import asyncio
@@ -83,13 +94,27 @@ for _stream in (sys.stdout, sys.stderr):
 # 下面几个是「和设备说好的暗号」。电脑端和固件必须一字不差，
 # 差一个字符设备就听不懂我们在说什么（设计文档 3.3）。
 
-# 设备广播自己时用的名字。扫描时按这个名字找它。
-DEVICE_NAME = "VibePet"
+# 串口波特率。必须与固件里的 Serial.begin(115200) 一致。
+SERIAL_BAUD = 115200
 
-# Nordic UART Service 的三个标准 UUID（这是蓝牙串口的通用约定，不是本项目
-# 发明的）。一个 Service 下面挂两条「管道」：RX 用来发，TX 用来收。
-NUS_RX_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  # 电脑 → 设备（Write）
-NUS_TX_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  # 设备 → 电脑（Notify）
+# 打开串口之后，等多久才算「设备真的准备好了」。
+#
+# 为什么需要它：板载的 USB 转串口芯片会在端口被打开时给主控一个复位脉冲，
+# 于是板子会重新跑一遍启动引导（约 1.5~2 秒），这段窗口里我们发过去的字节
+# 会被引导程序当成烧录命令吃掉。所以打开端口后先「让子弹飞一会儿」。
+BOOT_GRACE = 2.0
+
+# 自动找端口时用来打分的 USB 厂商号:产品号。
+# 官方 UNO 的几种转串口芯片一望即知；兼容板常用的 CH340 / FT232 / CP2102 次之。
+ARDUINO_VID_PID = {
+    (0x2341, 0x0043), (0x2341, 0x0001), (0x2A03, 0x0043),
+    (0x2341, 0x0243), (0x2341, 0x006A),
+}
+USB_SERIAL_VID_PID = {
+    (0x1A86, 0x7523),   # CH340（最常见的兼容板芯片）
+    (0x0403, 0x6001),   # FT232
+    (0x10C4, 0xEA60),   # CP2102
+}
 
 # ─────────────── 时序常量：几个「等多久」的决定 ───────────────
 #
@@ -103,11 +128,8 @@ HEARTBEAT_INTERVAL = 1.0
 # 等用户按按钮的最长时间；超时按拒绝处理。
 APPROVAL_TIMEOUT = 120.0
 
-# 蓝牙断了之后，隔多久重试一次连接。
+# 掉线之后，隔多久重试一次连接。
 RECONNECT_DELAY = 2.0
-
-# 每次扫描设备时，听多久的广播。
-SCAN_TIMEOUT = 5.0
 
 # 读一条本地请求最多等多久。注意这和「等按钮」是两码事 ——
 # 它只管「请求有没有发完整」，发完整之后才进入漫长的等按钮阶段。
@@ -116,13 +138,23 @@ REQUEST_TIMEOUT = 10.0
 # 命令摘要先截到 60 个字符，再按字节数把关（见下一行）。
 SUMMARY_MAX_LEN = 60
 
-# 单个字段（summary / msg）的字节上限：240 字节。
+# 单个字段（summary / msg）的字节上限：160 字节。
 #
 # 为什么要按「字节」而不是「字数」来限？因为设备是按字节数收行的：整行
-# 超过 512 字节就整条丢掉。而一个汉字在 UTF-8 里占 3 个字节，60 个汉字
-# 就是 180 字节 —— 按字数限长会放任它悄悄超限、然后被设备整条扔掉。
-# （固件整行上限 LINE_MAX=512，整行的固定开销约 85 字节，240 是留足余量的值。）
-MAX_FIELD_BYTES = 240
+# 超过 320 字节就整条丢掉。而一个汉字在 UTF-8 里占 3 个字节，按字数限长
+# 会放任它悄悄超限、然后被设备整条扔掉 —— 屏幕上什么都没有，120 秒后
+# 又莫名其妙地被拒绝，还查不出原因。
+# （固件整行上限 LINE_MAX=320，详见下面 MAX_TOOL_BYTES 的算式。）
+MAX_FIELD_BYTES = 160
+
+# 工具名的字节上限：24 字节。
+#
+# 这一条是为了守住整行不超过 320 字节。最坏情况是：
+#   固定骨架 66 + request_id 8 + tool 24 + summary 160 ≈ 258 字节
+# 留出余量才是 320。要是不限工具名，Claude Code 里
+# `mcp__github__create_issue` 这种名字（25 字符）就能把整行顶到 265 字节 ——
+# 若把上限收到 256，这条请求会被设备**整条静默丢弃**，电脑端全程不知道。
+MAX_TOOL_BYTES = 24
 
 # 当前是不是「啰嗦模式」（命令行加了 -v）。开着才打调试日志。
 _VERBOSE = False
@@ -146,12 +178,10 @@ def debug(message):
 
 # 把异常变成一句人话。
 #
-# 为什么要专门写这么个小函数？因为 bleak 抛异常时会把「消息 + 原因枚举」
-# 打包成元组塞进 args，直接 str(exc) 会把整个元组连枚举一起打出来，
-# 又长又难读。这里只取第一段文本。
+# 有些库（比如旧的蓝牙库）会把「消息 + 原因枚举」打包成元组塞进 args，
+# 直接 str(exc) 会把整个元组连枚举一起打出来，又长又难读；这里只取第一段文本。
 def format_error(exc):
-    """取异常的可读消息。bleak 把 (message, reason) 打包进 args，
-    直接 str() 会把整个元组连 reason 枚举一起打出来。"""
+    """取异常的可读消息，避免把整个元组连枚举一起打出来。"""
     if exc.args and isinstance(exc.args[0], str):
         return exc.args[0]
     return str(exc)
@@ -172,18 +202,97 @@ def _env_number(name, default, cast):
 # —————————————————————————— 传输层 ——————————————————————————
 #
 # 「传输层」的意思是：只管「怎么把一句话送过去」，不管送的是什么内容。
-# 把蓝牙的琐碎细节全关在这一节里，上面的 Bridge 类就能干净地只操心审批逻辑；
-# 以后想换通信方式（比如改走串口）也只动这一层。
+# 把串口的琐碎细节全关在这一节里，上面的 Bridge 类就能干净地只操心审批逻辑；
+# 以后想换通信方式（比如再回到蓝牙）也只动这一层。
 
 
-class BleTransport:
-    """真实 BLE 传输层。bleak 的细节全部关在这里，Bridge 只看到 connect / send。"""
+# 把串口异常翻成人话。
+#
+# 为什么值得单独写一个函数？因为这几种情况表面很像（都是「打不开」），
+# 处理办法却完全不同：端口被占用要去关掉串口监视器，端口不存在要换线或装驱动。
+# 直接把异常原文打出来，用户只能看到一句 "could not open port"，帮不上忙。
+def describe_serial_error(exc):
+    """把串口异常翻译成「该怎么办」，而不是「出了什么错」。"""
+    if isinstance(exc, PermissionError):
+        return "端口被占用（Arduino IDE 的串口监视器、另一个 daemon、或串口助手正拿着它）"
+    if isinstance(exc, FileNotFoundError):
+        return "端口不存在（线松了？换根数据线、换个 USB 口试试）"
+    text = str(exc)
+    lowered = text.lower()
+    if "拒绝访问" in text or "access is denied" in lowered:
+        return "端口被占用（先关掉串口监视器或另一个 daemon 再试）"
+    if "could not open port" in lowered:
+        return ("打不开端口（多半被别的程序占着；也可能是驱动没装好 —— "
+                "兼容板常见 CH340 芯片）")
+    if "timeout" in lowered:
+        return "串口读写超时（设备掉线了？）"
+    if "clearcommerror" in lowered or "semaphore" in lowered:
+        return "设备已断开（USB 被拔了或板子复位了）"
+    return text
 
-    def __init__(self, device_name):
-        self.device_name = device_name   # 要找的设备叫什么
-        self._client = None              # bleak 的连接对象；没连上时是 None
-        self._line_handler = None        # 收到一整行时调的回调（由 Bridge 注册）
-        self._rx_buffer = b""            # 收数据的缓冲区，见 _on_notify
+
+# 找一个「像是开发板」的串口。找不到返回 None（不是错误，过一会儿会再找）。
+#
+# 打分规则：官方 Arduino 的芯片最可信，描述里带 Arduino/Uno 的次之，
+# 常见的 USB 转串口芯片再次之。并列时取端口号靠前的那个 —— 至少结果稳定。
+def discover_port():
+    """按「像不像开发板」给所有串口打分，返回最像的那个端口名。"""
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return None
+
+    candidates = []
+    for info in list_ports.comports():
+        vid_pid = (info.vid, info.pid)
+        if vid_pid in ARDUINO_VID_PID:
+            score = 3
+        else:
+            text = f"{info.description or ''} {info.manufacturer or ''}".lower()
+            if "arduino" in text or "uno" in text:
+                score = 2
+            elif vid_pid in USB_SERIAL_VID_PID:
+                score = 1
+            else:
+                score = 0
+        if score > 0:
+            candidates.append((score, info.device, info.description or ""))
+
+    if not candidates:
+        return None
+    # 分数高的在前；同分按端口名排序，保证每次选的是同一个
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    for score, device, description in candidates:
+        debug(f"候选串口 {device}（{description}，匹配度 {score}）")
+    return candidates[0][1]
+
+
+class SerialTransport:
+    """真实串口传输层。pyserial 的细节全部关在这里，Bridge 只看到 connect / send。
+
+    和蓝牙相比，这里多了一个坑：串口是**独占**的（同一时刻只能一个程序拿着），
+    而且**打开端口会让开发板复位**。所以「已连接」的定义不是「端口打开了」，
+    而是「端口打开、并且等过了开发板启动的那几秒」。
+    """
+
+    def __init__(self, port=None, baudrate=SERIAL_BAUD, boot_grace=BOOT_GRACE,
+                 serial_factory=None):
+        self.port = port            # 用户指定的端口号；None = 自动找
+        self.baudrate = baudrate
+        self.boot_grace = boot_grace
+        # 测试用的注入点：给一个「造串口对象」的函数，就能在没有硬件的情况下
+        # 把这一层的逻辑跑通（见 pc/_smoke_test_serial.py）。
+        self._serial_factory = serial_factory
+
+        self._ser = None            # pyserial 的串口对象；没打开时是 None
+        self._invalid = True        # 这次连接是否已被判定失效
+        self._ready_at = 0.0        # 开发板启动完成、可以开始收发的时刻
+        self._line_handler = None   # 收到一整行时调的回调（由 Bridge 注册）
+        self._rx_buffer = b""       # 收数据的缓冲区，见 _read_loop
+        self._reader = None         # 后台读串口的线程
+        self._reader_stop = None    # 让它停下来的旗子
+        self._loop = None           # 事件循环，用来把数据从线程送回主线程
+        self._open_lock = None      # 防止重复打开端口（并发调用 ensure_connected 时）
 
     def set_line_handler(self, handler):
         """handler(line: str) —— 每收到一整行就回调一次。"""
@@ -193,80 +302,157 @@ class BleTransport:
     def connected(self):
         # 写成 @property 是为了让外面用 transport.connected（不带括号），
         # 读起来像在问一个「状态」，而不是调一个「动作」。
-        client = self._client
-        return client is not None and client.is_connected
+        #
+        # 注意最后那个时间判断：刚打开端口的那几秒里**故意**返回 False，
+        # 让上层走「刚连上 → 补发当前画面」那条路（见 connection_loop）。
+        return (self._ser is not None
+                and not self._invalid
+                and time.monotonic() >= self._ready_at)
 
     async def ensure_connected(self):
-        """确保已连接；未连接则扫描并连接。返回是否连通。"""
+        """确保串口已打开。返回是否真的可用（含等完开发板启动）。"""
         # 已经连着就什么都不做。这个函数会被后台循环反复调用，
         # 「有则跳过」让它能安心地一直在循环里调下去。
         if self.connected:
             return True
 
-        # 延迟导入：bleak 只有真实 BLE 模式才用得上。放在函数体里 import，
-        # 用 --no-ble 模式时就不必安装它。
-        from bleak import BleakClient, BleakScanner
+        if self._open_lock is None:
+            self._open_lock = asyncio.Lock()
+        async with self._open_lock:
+            if self.connected:
+                return True
 
-        # 听 SCAN_TIMEOUT 秒的广播，再从听到的设备里挑名字对得上的。
-        # 用「包含」而不是「完全相等」来匹配，因为广播名可能带后缀。
-        devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-        device = next(
-            (d for d in devices if d.name and self.device_name in d.name), None
-        )
-        if device is None:
-            debug(f"未扫描到 {self.device_name}（发现 {len(devices)} 个设备）")
-            return False   # 没找到不算错误，交给上层过一会儿再试
+            # 端口已经开着、只是还在等开发板启动 —— 那就等完它，别重复打开。
+            # （重复打开会再给板子一次复位脉冲，永远等不到「启动完成」。）
+            if self._ser is not None and not self._invalid:
+                await asyncio.sleep(max(0.0, self._ready_at - time.monotonic()))
+                return self.connected
 
-        # 连上，并订阅「设备主动推消息」的通知（Notify）—— 设备回传的按钮
-        # 消息就是从这条通道来的。
-        client = BleakClient(device, disconnected_callback=self._on_disconnect)
-        await client.connect()
-        await client.start_notify(NUS_TX_UUID, self._on_notify)
-        self._client = client
-        self._rx_buffer = b""    # 新连接，清掉上一轮可能残留的半截数据
-        log(f"已连接 {device.name or device.address}")
-        return True
+            port = self.port or discover_port()
+            if port is None:
+                log("没找到串口：检查 USB 线是不是**数据线**、板子有没有插好、"
+                    "驱动装了没（兼容板常见 CH340 芯片）")
+                return False
+
+            try:
+                ser = self._open(port)
+            except Exception as exc:
+                log(f"打开串口 {port} 失败：{describe_serial_error(exc)}")
+                return False
+
+            self._ser = ser
+            self._invalid = False
+            self._ready_at = time.monotonic() + self.boot_grace
+            self._rx_buffer = b""    # 丢掉上一轮可能残留的半截数据
+            self._start_reader(port)
+            log(f"已打开串口 {port}（{self.baudrate} 波特，"
+                f"等 {self.boot_grace:g} 秒让开发板启动）")
+
+            # 等开发板把引导程序走完，这段窗口里发出去的字节会被它吃掉。
+            await asyncio.sleep(self.boot_grace)
+            return self.connected
+
+    def _open(self, port):
+        if self._serial_factory is not None:
+            return self._serial_factory(port)
+        # 延迟导入：pyserial 只有真实串口模式才用得上。放在函数体里 import，
+        # 用 --no-device 模式时就不必安装它。
+        import serial
+        # timeout：读不到数据时最多阻塞多久（决定后台线程的响应速度）。
+        # write_timeout：写不出去时最多等多久 —— 设备掉线时 write 会卡住，
+        # 有这个上限才能及时发现并判定掉线，不会一直僵在那里。
+        return serial.Serial(port, self.baudrate, timeout=0.05, write_timeout=0.5)
 
     async def send_line(self, text):
         # 用局部变量而不是 self.connected 做前置检查：属性检查无法让类型检查器
-        # 窄化 self._client（BleakClient | None），会误报「不是 None 的属性」。
+        # 窄化 self._ser（Serial | None），会误报「不是 None 的属性」。
         # 语义与 connected 完全一致，且检查与使用之间引用不会变。
-        client = self._client
-        if client is None or not client.is_connected:
-            raise ConnectionError("BLE 未连接")
-        # 协议规定「一条消息一行」，所以补上换行符再发。
-        await client.write_gatt_char(NUS_RX_UUID, (text + "\n").encode("utf-8"))
+        ser = self._ser
+        if ser is None or self._invalid:
+            raise ConnectionError("设备未连接")
+        try:
+            # 协议规定「一条消息一行」，所以补上换行符再发。
+            ser.write((text + "\n").encode("utf-8"))
+        except Exception as exc:
+            # 写不出去 = 设备不在了（线被拔、板子复位）。这里**必须抛异常**：
+            # Bridge 靠它来记账（_state_dirty），重连后才知道要补发什么。
+            self._invalidate(f"写入失败：{describe_serial_error(exc)}")
+            raise ConnectionError(f"串口写入失败：{exc}") from exc
         debug(f"→ 设备: {text}")
 
-    def _on_disconnect(self, client):
-        # 这是注册给 bleak 的回调：连接掉了它会来喊一声。
-        # 我们只把引用清掉，重连的事由 connection_loop 操心。
-        log("BLE 连接断开")
-        self._client = None
+    # —— 收数据：单独开一个线程 ——
+    #
+    # 为什么不能用 asyncio 直接读？因为 pyserial 是**阻塞式**的：它的 read()
+    # 会一直占着当前线程。放进后台线程读，事件循环才能继续处理 socket 和心跳。
 
-    def _on_notify(self, sender, data):
-        """设备 → 电脑。通知回调运行在事件循环线程里，可直接碰 asyncio 原语。
+    def _start_reader(self, port):
+        self._loop = asyncio.get_running_loop()
+        self._reader_stop = threading.Event()
+        self._reader = threading.Thread(
+            target=self._read_loop, args=(port,), name="vibepet-serial", daemon=True
+        )
+        self._reader.start()
 
-        按 bytes 累积再按 b"\\n" 切分：UTF-8 多字节字符绝不会与 0x0A 冲突，
-        因此跨包分片的字符不会被破坏（若先 decode 再拼接则会解出乱码）。
+    def _read_loop(self, port):
+        """后台线程：不停读串口，把攒好的整行送回事件循环处理。"""
+        while not self._reader_stop.is_set():
+            ser = self._ser
+            if ser is None:
+                return
+            try:
+                # in_waiting 是「已经到货的字节数」。没有也读 1 个 —— read()
+                # 会等到 timeout（50 毫秒）再返回，相当于一个温和的轮询。
+                waiting = ser.in_waiting or 1
+                data = ser.read(waiting)
+            except Exception as exc:
+                if not self._reader_stop.is_set():
+                    self._loop.call_soon_threadsafe(
+                        self._invalidate, f"读取失败：{describe_serial_error(exc)}"
+                    )
+                return
+            if data:
+                self._feed(data)
+
+    def _feed(self, data):
+        """把收到的字节攒成整行。**这个函数跑在后台线程里。**
+
+        关键细节：**先按字节攒、切分完再解码**。若反过来（先解码再拼接），
+        某个汉字的 3 个字节要是被拆在两次读取里，就会解出乱码。而按字节处理
+        时，换行符 0x0A 永远不会出现在一个 UTF-8 多字节字符的内部，
+        所以这样切一定安全。
+
+        切出来的行不能直接在这里处理（Bridge 里的 asyncio 原语只能在事件循环
+        线程上碰），所以用 call_soon_threadsafe 把它「递」回主线程去。
         """
-        # 蓝牙一次推来的数据不保证「恰好一整行」—— 可能半行，也可能两行半。
-        # 所以先把字节攒起来，再从头找换行符，切出一条算一条。
-        #
-        # 关键细节：**先按字节攒、切分完再解码**。若反过来（先解码再拼接），
-        # 某个汉字的 3 个字节要是被拆进两个包里，就会解出乱码。而按字节处理
-        # 时，换行符 0x0A 永远不会出现在一个 UTF-8 多字节字符的内部，
-        # 所以这样切一定安全。
         self._rx_buffer += data
         while b"\n" in self._rx_buffer:
             line, self._rx_buffer = self._rx_buffer.split(b"\n", 1)
             text = line.decode("utf-8", errors="replace").strip()
             if text and self._line_handler:
-                self._line_handler(text)
+                self._loop.call_soon_threadsafe(self._line_handler, text)
+
+    def _invalidate(self, reason):
+        """标记这次连接已失效并关掉端口；下一次 connection_loop 会重新找端口。
+
+        端口号重新插拔之后可能会变，所以这里**不记住**旧端口号，
+        重连时一律重新发现。
+        """
+        ser, self._ser = self._ser, None
+        self._invalid = True
+        self._ready_at = 0.0
+        if self._reader_stop is not None:
+            self._reader_stop.set()
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:
+                pass
+        if reason:
+            log(f"串口连接失效（{reason}），将自动重连")
 
 
 class NullTransport:
-    """--no-ble 模式：不做真实 BLE。
+    """--no-device 模式：不连真实设备。
 
     待发送的消息记为日志，按钮事件改由本地 Socket 注入 —— 这样在没有硬件的
     情况下也能把 Socket 协议、request_id 匹配、超时降级整条链路跑通。
@@ -290,20 +476,20 @@ class NullTransport:
         return True
 
     async def send_line(self, text):
-        # 真蓝牙没了，就把「本来要发什么」打进日志，方便对着调试。
-        debug(f"[no-ble] → 设备: {text}")
+        # 真设备没了，就把「本来要发什么」打进日志，方便对着调试。
+        debug(f"[no-device] → 设备: {text}")
 
 
 # —————————————————————————— 桥接核心 ——————————————————————————
 #
 # Bridge 是「大脑」：审批怎么走、状态怎么同步、断了怎么补，规则都在这儿。
-# 它不碰蓝牙细节（那是传输层的事），也不碰网络细节（那是下面 Socket 那节的事），
+# 它不碰串口细节（那是传输层的事），也不碰网络细节（那是下面 Socket 那节的事），
 # 只对着两件事写逻辑：往设备发一条、收到设备一条。
 
 
 class Bridge:
     def __init__(self, transport, approval_timeout=APPROVAL_TIMEOUT):
-        # transport 就是上面那个「传输层」—— 真蓝牙或空壳都行，反正接口一样。
+        # transport 就是上面那个「传输层」—— 真实串口或空壳都行，反正接口一样。
         self.transport = transport
         self.approval_timeout = approval_timeout
 
@@ -326,7 +512,7 @@ class Bridge:
         self._state_dirty = False
 
         # ── 审批进行中的存档 ──
-        # 审批进行中的完整参数。BLE 中断重连后用它重发审批卡，且必须沿用
+        # 审批进行中的完整参数。链路中断重连后用它重发审批卡，且必须沿用
         # 原 request_id，否则设备回传的按钮对不上（F8）。
         self._pending_approval = None
 
@@ -357,25 +543,37 @@ class Bridge:
             log(f"设备消息不是合法 JSON，已忽略: {line[:80]!r}")
             return
 
-        # 设备固件只发对象，但这条链路是攻击面之外的外部输入（BLE 对端可能是
+        # 设备固件只发对象，但这条链路是攻击面之外的外部输入（串口那头可能是
         # 任何东西）。非对象 JSON 会让下面的 .get() 抛 AttributeError —— 它虽被
         # asyncio 的异常处理器兜住不至于崩进程，却会留下未处理异常并丢掉这一行。
         if not isinstance(msg, dict):
             log(f"设备消息不是 JSON 对象（{type(msg).__name__}），已忽略: {line[:80]!r}")
             return
 
-        # 第二步：是「按钮」这一类消息吗？
+        # 第二步：是设备刚启动时打的招呼吗？
+        #
+        # 为什么需要这一条：**打开串口就会让板子复位**（按板上的复位键、
+        # 重新烧录也一样）。复位后设备会回到开机画面，而这件事**不会**断开串口 ——
+        # 光靠「掉线重连后补发」根本发现不了，屏幕就会一直停在开机画面上。
+        # 所以设备启动时主动喊一声，我们收到就把当前该显示的画面补发过去。
+        if msg.get("type") == "hello":
+            log(f"设备已启动（固件 {msg.get('fw', '版本未知')}），补发当前画面")
+            self._state_dirty = True   # 屏幕现在是开机画面，账本肯定不准了
+            asyncio.create_task(self.resend_current())
+            return
+
+        # 第三步：是「按钮」这一类消息吗？
         if msg.get("type") != "button":
             log(f"未知的设备消息类型 {msg.get('type')!r}，已忽略")
             return
 
-        # 第三步：动作合法吗？我们只认批准 / 拒绝两种。
+        # 第四步：动作合法吗？我们只认批准 / 拒绝两种。
         action = msg.get("action")
         if action not in ("approve", "deny"):
             log(f"按钮动作非法 {action!r}，已忽略")
             return
 
-        # 第四步（最关键）：这个按钮是「这一次审批」的吗？
+        # 第五步（最关键）：这个按钮是「这一次审批」的吗？
         #
         # F8：只接受当前等待中的 request_id。上一次审批超时之后才按下的
         # 「迟到按钮」在这里被丢弃，不会误批准下一次请求。
@@ -396,7 +594,7 @@ class Bridge:
         self._button_event.set()
 
     def inject_button(self, msg):
-        """把一条 button 消息当作设备回传处理（供 --no-ble 模式与测试使用）。"""
+        """把一条 button 消息当作设备回传处理（供 --no-device 模式与测试使用）。"""
         # 没有真设备时怎么测按钮？靠它：把一条假消息塞进同一条处理链路，
         # 走的是和真设备完全一样的代码。
         self._on_device_line(json.dumps(msg, ensure_ascii=False))
@@ -408,7 +606,7 @@ class Bridge:
     async def _send(self, payload):
         # 所有发给设备的消息都从这儿出去：统一检查连接、统一转成 JSON 文本。
         if not self.transport.connected:
-            raise ConnectionError("BLE 未连接")
+            raise ConnectionError("设备未连接")
         await self.transport.send_line(json.dumps(payload, ensure_ascii=False))
 
     async def send_state(self, status, msg=""):
@@ -448,7 +646,9 @@ class Bridge:
             await self._send({
                 "type": "approval_request",
                 "request_id": request_id,   # 设备回传按钮时要把这个原样带回来
-                "tool": tool,
+                # 工具名也要限长，否则长名字会把整行顶过设备的行长上限，
+                # 那一条审批请求会被整条丢弃（见 MAX_TOOL_BYTES 的说明）。
+                "tool": clamp_bytes(tool, MAX_TOOL_BYTES),
                 "summary": clamp_bytes(summary, MAX_FIELD_BYTES),
             })
             # 设备此刻显示的是审批卡而非任何 state。标记屏幕内容与 _last_state
@@ -515,9 +715,9 @@ class Bridge:
         # 在这一行排队：同一时刻只跑一个审批（F9）。第二个请求会等在这儿，
         # 直到第一个彻底走完。
         async with self._approval_lock:
-            # 没蓝牙就没什么可等的了，直接拒绝。
+            # 没连上设备就没什么可等的了，直接拒绝。
             if not self.transport.connected:
-                log(f"BLE 未连接，审批降级为 deny（tool={tool_name}）")
+                log(f"设备未连接，审批降级为 deny（tool={tool_name}）")
                 return {"action": "deny"}
 
             # 先占槽再发送：按钮校验只认槽里的 request_id，若等 wait_for_button
@@ -530,7 +730,7 @@ class Bridge:
             self._pending_request_id = request_id
             self._button_action = None
             self._button_event.clear()
-            # 存一份完整参数 —— 万一发送途中蓝牙断了，重连后靠它把卡重发一遍。
+            # 存一份完整参数 —— 万一发送途中设备掉了，重连后靠它把卡重发一遍。
             self._pending_approval = {
                 "request_id": request_id,
                 "tool": tool_name,
@@ -566,7 +766,7 @@ class Bridge:
             return {"action": action}
 
     def status(self):
-        # 给调试用的「现在什么情况」快照。--no-ble 模式下想手动模拟按钮，
+        # 给调试用的「现在什么情况」快照。--no-device 模式下想手动模拟按钮，
         # 就得先问它要 pending_request_id（见文件开头的用法说明）。
         return {
             "connected": self.transport.connected,
@@ -587,7 +787,7 @@ class Bridge:
                     seq += 1
                     await self._send({"type": "heartbeat", "seq": seq})
             except Exception as exc:
-                # 发心跳失败不是世界末日（可能蓝牙正在断），记一笔就好。
+                # 发心跳失败不是世界末日（可能串口正断着），记一笔就好。
                 # 关键是别让异常把循环打断 —— 循环一断就再也不会发心跳了。
                 log(f"心跳发送失败: {exc}")
             # 睡一秒再发下一次。注意这句在 try 外面：就算上面出错也要等一秒，
@@ -595,9 +795,9 @@ class Bridge:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
 
     async def connection_loop(self):
-        """维持 BLE 连接：断了就重连，重连失败不退出，一直重试。
+        """维持串口连接：断了就重连，重连失败不退出，一直重试。
 
-        同一个错误只打印一次。蓝牙没开之类的持续故障会每 2 s 重试一轮，
+        同一个错误只打印一次。没插板子之类的持续故障会每 2 s 重试一轮，
         逐轮刷屏会把真正有用的日志冲掉。
         """
         last_error = None
@@ -614,16 +814,16 @@ class Bridge:
                     # 连上了就清掉错误记录，这样下次再断会有新的日志。
                     last_error = None
                 except Exception as exc:
-                    # 同一句话只喊一遍：蓝牙没开时每 2 秒失败一次，每次都打印
+                    # 同一句话只喊一遍：没插板子时每 2 秒失败一次，每次都打印
                     # 会把真正有用的日志冲没。
                     message = format_error(exc)
                     if message != last_error:
-                        log(f"BLE 连接失败: {message}")
+                        log(f"串口连接失败: {message}")
                         last_error = message
                     else:
-                        debug(f"BLE 连接失败（与上次相同）: {message}")
+                        debug(f"串口连接失败（与上次相同）: {message}")
             # 连着的时候每秒瞄一眼就行；断着的时候隔 2 秒再试一次 ——
-            # 别把 CPU 和蓝牙适配器逼疯。
+            # 别把 CPU 和串口逼疯。
             await asyncio.sleep(1.0 if self.transport.connected else RECONNECT_DELAY)
 
 
@@ -635,11 +835,11 @@ class Bridge:
 
 # 把一段文字截短，但不许超过 max_bytes 个**字节**。
 #
-# 为什么强调「字节」？因为设备是按字节数收行的（超 512 字节整条丢掉）。
-# 而 Python 的切片是按「字符」算的：直接写 text[:240] 看着挺安全，实际
-# 240 个汉字会变成 720 字节，整条消息被设备扔掉，屏幕上什么都看不到。
+# 为什么强调「字节」？因为设备是按字节数收行的（超 320 字节整条丢掉）。
+# 而 Python 的切片是按「字符」算的：直接写 text[:160] 看着挺安全，实际
+# 160 个汉字会变成 480 字节，整条消息被设备扔掉，屏幕上什么都看不到。
 #
-# 末尾那个 errors="ignore" 是关键：切到第 240 字节时，可能正好把一个汉字
+# 末尾那个 errors="ignore" 是关键：切到第 160 字节时，可能正好把一个汉字
 # 的 3 个字节切成 1 个半，这种残缺字节解码会报错；ignore 让 Python 干脆
 # 丢弃它 —— 结果最多是「少显示一个字」，绝不会切出乱码。
 def clamp_bytes(text, max_bytes):
@@ -707,11 +907,11 @@ async def dispatch(bridge, req):
     msg_type = req.get("type", "approval")   # 缺省当审批处理
 
     if msg_type == "status":
-        # 问问现在什么情况（调试用，--no-ble 模式下靠它拿 request_id）。
+        # 问问现在什么情况（调试用，--no-device 模式下靠它拿 request_id）。
         return bridge.status()
 
     if msg_type == "button":
-        # 供 --no-ble 模式与测试注入按钮事件。真实模式下按钮走 BLE 通知，
+        # 供 --no-device 模式与测试注入按钮事件。真实模式下按钮走串口，
         # 但这里仍接受 —— 8765 只监听回环地址，能连上它的进程本就能做更多事。
         bridge.inject_button(req)
         return {"ok": True}
@@ -778,19 +978,19 @@ async def amain(args):
     global _VERBOSE
     _VERBOSE = args.verbose
 
-    if args.no_ble:
-        log("以 --no-ble 模式启动：不连接 BLE，按钮事件可通过本地 Socket 注入")
+    if args.no_device:
+        log("以 --no-device 模式启动：不连接设备，按钮事件可通过本地 Socket 注入")
         transport = NullTransport()
     else:
         # 先探测依赖。否则 connection_loop 会每 2 s 重试一次并刷一行
-        # 「No module named 'bleak'」，看似在工作实则永远连不上。
+        # 「No module named 'serial'」，看似在工作实则永远连不上。
         try:
-            import bleak  # noqa: F401
+            import serial  # noqa: F401
         except ImportError:
-            log("未安装 bleak，无法连接 BLE。安装：pip install bleak")
-            log("若只想调试本地链路（不需要硬件），请加 --no-ble")
+            log("未安装 pyserial，无法连接设备。安装：pip install pyserial")
+            log("若只想调试本地链路（不需要硬件），请加 --no-device")
             return 1
-        transport = BleTransport(args.device_name)
+        transport = SerialTransport(args.serial_port, args.baud)
 
     # 把传输层交给 Bridge（大脑），之后它俩自己配合。
     bridge = Bridge(transport, args.timeout)
@@ -822,17 +1022,21 @@ def parse_args(argv=None):
     # argparse 是 Python 自带的命令行参数解析器，负责处理用户敲的参数
     # 和自动生成 --help。每个选项下面都写了中文说明。
     parser = argparse.ArgumentParser(
-        description="VibePet 桥接守护进程：BLE 连接管理 + 本地审批 Socket 服务",
+        description="VibePet 桥接守护进程：串口连接管理 + 本地审批 Socket 服务",
     )
-    parser.add_argument("--no-ble", action="store_true",
-                        help="跳过 BLE，仅运行本地 Socket（无硬件开发/测试用）")
+    parser.add_argument("--no-device", action="store_true",
+                        help="跳过设备串口，仅运行本地 Socket（无硬件开发/测试用）")
     parser.add_argument("--host", default=os.environ.get("VIBEPET_HOST", "127.0.0.1"),
                         help="本地 Socket 监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int,
                         default=_env_number("VIBEPET_PORT", 8765, int),
                         help="本地 Socket 监听端口（默认 8765）")
-    parser.add_argument("--device-name", default=DEVICE_NAME,
-                        help=f"BLE 广播名（默认 {DEVICE_NAME}）")
+    parser.add_argument("--serial-port",
+                        default=os.environ.get("VIBEPET_SERIAL_PORT") or None,
+                        help="设备所在的串口，如 COM7；不填则自动寻找（也可用"
+                             "环境变量 VIBEPET_SERIAL_PORT）")
+    parser.add_argument("--baud", type=int, default=SERIAL_BAUD,
+                        help=f"串口波特率（默认 {SERIAL_BAUD}）")
     parser.add_argument("--timeout", type=float,
                         default=_env_number("VIBEPET_TIMEOUT", APPROVAL_TIMEOUT, float),
                         help=f"审批超时秒数，超时降级为 deny（默认 {APPROVAL_TIMEOUT:g}）")

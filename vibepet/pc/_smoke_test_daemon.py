@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""bridge_daemon.py 冒烟测试 —— --no-ble 模式，不需要硬件。跑完即删的临时文件。
+"""bridge_daemon.py 冒烟测试 —— --no-device 模式，不需要硬件。跑完即删的临时文件。
 
-覆盖：审批闭环、request_id 匹配（F8）、超时降级、并发排队（F9）、
-协议容错，以及一次 hook_client → daemon 的端到端联调。
+覆盖：审批闭环、request_id 匹配（F8）、超时降级、并发排队（F9）、协议容错、
+整行长度预算，以及一次 hook_client → daemon 的端到端联调。
 """
 import asyncio
 import json
@@ -87,7 +87,7 @@ log_fd, log_path = tempfile.mkstemp(suffix=".log", text=True)
 os.close(log_fd)
 log_handle = open(log_path, "w", encoding="utf-8")
 daemon_proc = subprocess.Popen(
-    [sys.executable, DAEMON, "--no-ble", "--port", str(PORT),
+    [sys.executable, DAEMON, "--no-device", "--port", str(PORT),
      "--timeout", str(APPROVAL_TIMEOUT), "-v"],
     stdout=subprocess.DEVNULL, stderr=log_handle,
 )
@@ -306,8 +306,9 @@ try:
     record("端到端 hook_client -> daemon -> 按钮", problems)
 
     # —— 用例 9：UTF-8 边界安全截断（clamp_bytes）——
-    # 固件 LINE_MAX=512，单字段必须按「字节」而非「字符」限长：
-    # 60 个汉字 = 180 字节是合法的，而按字符截断会放任它涨到 265 字节。
+    # 设备按「字节」收行（整行上限 320、单字段 160），所以截断必须按字节算：
+    # 一个汉字在 UTF-8 里占 3 个字节，按字符截断会让 60 个汉字悄悄变成 180 字节。
+    # （下面用 240 这个限值是为了让边界落在「非整数倍」上，与协议取值无关。）
     problems = []
     try:
         from bridge_daemon import clamp_bytes
@@ -437,6 +438,36 @@ try:
     except Exception as exc:
         problems.append(f"并发发送异常: {exc!r}")
     record("并发发送同一条状态只下发一条", problems)
+
+    # —— 用例 13：整行长度预算（最坏情况不能超过设备的行上限）——
+    # 背景：设备固件的行上限是 LINE_MAX=320 字节，超长的行**整条丢弃**。
+    # 所以电脑端必须保证最坏情况（超长工具名 + 满长度的中文摘要）也塞得下：
+    #     固定骨架 66 + request_id 8 + tool 24 + summary 160 ≈ 258 字节
+    # 这条用例防的就是「以后有人把上限改小了」或「工具名忘了截断」—— 那会让
+    # 审批请求被设备静默丢弃：屏幕什么都不显示，120 秒后超时拒绝，
+    # 而 daemon 全程以为发送成功了，日志里一无所获。
+    problems = []
+    try:
+        from bridge_daemon import MAX_FIELD_BYTES, MAX_TOOL_BYTES, clamp_bytes
+        worst_tool = clamp_bytes("mcp__github__create_issue", MAX_TOOL_BYTES)
+        worst_summary = clamp_bytes("汉" * 200, MAX_FIELD_BYTES)
+        line = json.dumps({
+            "type": "approval_request",
+            "request_id": "01234567",
+            "tool": worst_tool,
+            "summary": worst_summary,
+        }, ensure_ascii=False)
+        size = len(line.encode("utf-8")) + 1        # +1 是行尾的换行符
+        if size > 320:
+            problems.append(
+                f"最坏情况整行 {size} 字节 > 设备上限 320，会被整条丢弃")
+        if len(worst_tool.encode("utf-8")) > MAX_TOOL_BYTES:
+            problems.append(f"工具名没有被截到 {MAX_TOOL_BYTES} 字节以内")
+        if len(worst_summary.encode("utf-8")) > MAX_FIELD_BYTES:
+            problems.append(f"摘要没有被截到 {MAX_FIELD_BYTES} 字节以内")
+    except ImportError as exc:
+        problems.append(f"协议常量尚未实现: {exc}")
+    record("整行长度预算（最坏情况 ≤ 320 字节）", problems)
 
 finally:
     daemon_proc.terminate()

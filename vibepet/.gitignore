@@ -8,7 +8,7 @@ firmware/**/build/
 *.ino.elf
 *.ino.map
 
-# PlatformIO（固件若改用 PlatformIO 构建，见设计文档 5.1）
+# PlatformIO（本项目用 arduino-cli / Arduino IDE 构建；这几条留着以防以后迁移）
 .pio/
 .pioenvs/
 .piolibdeps/
