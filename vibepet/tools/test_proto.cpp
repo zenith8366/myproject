@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "vibepet_proto.h"
+#include "cn_font.h"
 
 static int checks = 0;
 static int failures = 0;
@@ -245,6 +246,66 @@ static void test_real_messages(void) {
     expect(!vpJsonKeyIs("{\"type\":\"sta", "type", "state"), "值残缺 → 拒绝", NULL);
 }
 
+/* ─────────────── 七、字库取行 ─────────────── */
+
+/* 「中」在 12×13 格子里的样子，与 `python tools/gen_cn_font.py --dump 中` 的输出一致。
+   这一条把整条链路串起来了：U8g2 原始字库 → Python 解码打包 → cn_font.h → 设备端取行。
+   任何一环错了，画出来的就不是这个字。 */
+static const char *ZHONG_ART[CN_FONT_H] = {
+    "............",
+    ".....#......",
+    ".....#......",
+    ".#########..",
+    ".#...#...#..",
+    ".#...#...#..",
+    ".#...#...#..",
+    ".#########..",
+    ".#...#...#..",
+    ".....#......",
+    ".....#......",
+    ".....#......",
+    "............",
+};
+
+static void test_font_rows(void) {
+    int16_t glyph = cnFontFind(0x4E2D);   /* 中 */
+    if (glyph < 0) {
+        expect(false, "字库里能找到「中」", NULL);
+        return;
+    }
+    bool ok = true;
+    for (uint8_t row = 0; row < CN_FONT_H && ok; row++) {
+        uint16_t mask = cnFontRow((uint16_t)glyph, row);
+        for (uint8_t col = 0; col < CN_FONT_W; col++) {
+            // 位序约定：mask 的第 col 位就是第 col 列（位 0 = 最左）。
+            // 这里若写成 0x800 >> col，读到的就是镜像的列 —— 那说明取行函数与
+            // 打包约定不一致（屏幕上表现为整个字左右翻转），本条会立刻失败。
+            bool ink = (mask & (1 << col)) != 0;
+            bool want = ZHONG_ART[row][col] == '#';
+            if (ink != want) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    expect(ok, "「中」的 13×12 点阵与生成时逐位一致", "取行结果与期望图形不符");
+
+    /* 索引超过 255 的字必须能取到自己的点阵。
+       —— 这是真实事故的回归测试：取行函数的参数一度写成 8 位整数，而字库有 390 个字，
+       索引 >= 256 的那些字全被截断成「索引 - 256」那个字，屏幕上表现为
+       「有的汉字变成了英文字母」。参数写窄了这条就会失败（两个字取到同一份点阵）。 */
+    expect(CN_FONT_COUNT > 256, "字库够大，下面这条才有意义", NULL);
+    int16_t last = (int16_t)(CN_FONT_COUNT - 1);
+    int16_t wrapped = (int16_t)(last - 256);
+    bool differs = false;
+    for (uint8_t row = 0; row < CN_FONT_H && !differs; row++) {
+        if (cnFontRow((uint16_t)last, row) != cnFontRow((uint16_t)wrapped, row)) {
+            differs = true;
+        }
+    }
+    expect(differs, "索引 > 255 的字不会被截断成别的字", "两个不同的字取到了同一份点阵");
+}
+
 int main(void) {
     printf("vibepet_proto 离线测试\n");
     printf("\n一、取字段\n");
@@ -259,6 +320,8 @@ int main(void) {
     test_line_assembly();
     printf("\n六、接近真实的报文\n");
     test_real_messages();
+    printf("\n七、字库取行\n");
+    test_font_rows();
 
     printf("\n==================================================\n");
     if (failures == 0) {

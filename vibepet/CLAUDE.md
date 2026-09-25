@@ -8,11 +8,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **已实现并有验证**（2026-09-25）：
   - `firmware/VibePet_UNO/`：`VibePet_UNO.ino`（857 行）+ `vibepet_proto.h`（协议内核）+ `cn_font.h`（生成物）。**编译零警告**，Flash 27636/32256（85%）、RAM 1282/2048（62%）
   - `tools/gen_cn_font.py`：字库裁剪工具，`--verify` 黄金字形自检通过（`中` / `A` 逐位一致）
-  - `tools/test_proto.cpp`：协议内核的**离线测试（52 例）**，用 g++ 在电脑上跑，不需要硬件
+  - `tools/test_proto.cpp`：固件端**离线测试（55 例：协议解析 + 字库取行）**，用 g++ 在电脑上跑，不需要硬件
   - `pc/bridge_daemon.py` 的 `SerialTransport` + `pc/_smoke_test_serial.py`（9 例）
   - Python 侧四套冒烟测试共 **43 例全通过**
 - **屏幕已验证点亮**：`test-firmware/tfttest_uno` 在这块 UNO + 1.77" 屏上显示正常（用户实测）。
-- **尚未做**：固件在真机上的端到端联调（烧录、串口收发、按钮、看门狗、中文渲染的实机观感）；设计文档里标「待实测」的性能数字。
+- **固件已烧录并跑起来**（2026-09-25，COM9）：设备上电/复位后会发 `{"type":"hello","fw":"uno/1.0"}`，串口 115200 收发正常、中文经探针发送不乱码。
+- **尚未做**：屏幕显示内容的实机观感（六态、中文折行、空心方框降级）、按钮回传、看门狗 LOST 与恢复、daemon 端到端；设计文档里标「待实测」的性能数字。
 - **v2.0 遗留已清理**（2026-09-25）：删掉了 `firmware/VibePet/`（901 行 ESP32 固件）、`vendor/TFT_eSPI/`（274 个文件，占仓库跟踪文件数的 94%）、`firmware/TFT_eSPI_User_Setup.h`、`test-firmware/tft_probe{,2}/`。仓库跟踪文件从 295 个降到 17 个，只剩有线版一条路线；要查旧实现请翻 git 历史。
 
 ## 仓库现状
@@ -21,7 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `pc/bridge_daemon.py` —— 桥接守护进程（常驻）。传输层是**鸭子类型的 4 方法契约**（`set_line_handler` / `connected` 属性 / `async ensure_connected` / `async send_line`），`Bridge` 与全部审批逻辑对此无感；`SerialTransport` 是串口实现（后台线程读 + `call_soon_threadsafe` 送回事件循环）
 - `firmware/VibePet_UNO/` —— UNO 固件与协议内核（**注释是写给新手看的，见下方说明**）
 - `pc/_smoke_test.py`（7 例）、`pc/_smoke_test_daemon.py`（13 例）、`pc/_smoke_test_state.py`（14 例）、`pc/_smoke_test_serial.py`（9 例）—— 冒烟测试，**均不依赖硬件**
-- `tools/test_proto.cpp` —— 协议内核的离线测试（52 例），g++ 编译即跑，**也不需要硬件**
+- `tools/test_proto.cpp` —— 固件端离线测试（55 例：协议解析 + 字库取行），g++ 编译即跑，**也不需要硬件**
 - `test-firmware/tfttest_uno/tfttest_uno.ino` —— **UNO + ST7735 的接线与库用法权威参考**（Adafruit_GFX + Adafruit_ST7735，引脚 CS=D10 / DC=D9 / RES=D8 / SCK=D13 / MOSI=D11 / 背光→3.3V）。主固件的显示部分照它写，且已实测点亮
 - `tools/cn_charset.txt` —— 字库字集清单；`tools/gen_cn_font.py` —— 字库裁剪工具
 - `README.md` —— **面向使用者**的文档（安装 / 日常使用 / 排障），受众与 CLAUDE.md 不同。改了用户可见的行为（命令行参数、状态含义、接线、安装步骤）要同步更新它
@@ -40,15 +41,16 @@ python pc/_smoke_test_serial.py    # 串口传输层：9 例，注入假串口�
 
 # 上机调试：串口探针（手工给设备发 JSON，相当于 v2.0 时代的 nRF Connect）
 # 用它之前先停掉 daemon；打开串口会让板子复位，等约 2 秒
-python tools/serial_probe.py COM7
+python tools/serial_probe.py COM9
 #   /state working 正在分析代码     /state needs_you 要删缓存了
 #   /approve  /deny  /heartbeat  /raw {"type":"state"}
 #   直接敲一行 JSON 回车也行；设备回传的每一行都会带时间戳打印出来
+#   它会自动每 2 秒发一次心跳（否则屏幕 5 秒就翻成 LOST）；想看 LOST 加 --no-heartbeat
 
 # 协议内核的离线测试（也不需要硬件！用电脑上的 g++ 编译固件里的那份解析代码）
 # 可执行文件写到临时目录 —— 别落在仓库里，那会平白多个未跟踪文件
 g++ -I tools/proto_test -I firmware/VibePet_UNO tools/test_proto.cpp -o /tmp/proto_test \
-  && /tmp/proto_test               # 52 例：转义、\uXXXX、嵌套、UTF-8 边界、行重组
+  && /tmp/proto_test               # 55 例：转义、嵌套、UTF-8 边界、行重组、字库取行
 
 # 语法检查
 python -m py_compile pc/hook_client.py pc/bridge_daemon.py
@@ -248,6 +250,7 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 - **同一时间只处理一个审批请求**（单槽 `current_request_id`，需求 F9）。多会话 FIFO 队列属于可扩展方向，不在第一版。
 - **设备端禁用清单**（每一条都会直接吃掉 2 KB RAM / 32 KB Flash 的预算）：`String` 类、ArduinoJson、任何 `malloc`/`new`、`float`/`double` 与 `sin()`/`sqrt()` 等浮点函数、裸字符串字面量（必须用 `F("...")` 放回 Flash）、循环里的 `delay()`。
 - **中文显示**：正文用自制 12px 子集字库（`firmware/VibePet_UNO/cn_font.h`，从 U8g2 的文泉驿点阵宋体裁出 **390 字**（95 个 ASCII + 295 个汉字），12×13 点阵、20 字节位图 + 2 字节索引 + 1 字节步进宽，**每个字约 23 字节 Flash**，合计约 9 KB）；标题类大字用 Adafruit_GFX 内置字体放大 2 倍。**未收录的字形画 12×13 空心方框**，不显示乱码也不静默省略。ASCII 与汉字走同一张表、同一套绘制路径。
+  **取行用 `cnFontRow()` —— 它在 `cn_font.h` 里，由生成工具一并生成**（这样离线测试能验证同一份代码）。两个必须记住的约定：**位序上「返回值的第 c 位就是第 c 列」，位 0 是最左**（写成 `0x800 >> c` 会读到镜像的列，整字左右翻转）；**字形索引要用 16 位**（字库 390 字，用 `uint8_t` 会把索引 ≥ 256 的字截断成别的字）。这两条都踩过，`tools/test_proto.cpp` 里有对应的回归测试。
 - **设备端单行缓冲的两条铁律**（都在 `firmware/VibePet_UNO/` 里，改代码前先读那里的注释）：
   ① 一条消息处理完只摘 `ready` 旗，**绝不清空行缓冲的长度** —— 处理一条消息可能重绘整屏几十毫秒，这期间串口会收进下一条消息的开头，清掉就等于把它截断丢弃（`vibepet_proto.h` 的 `vpLineConsume`）；
   ② 派发函数里**先把字段全部取进局部变量，最后才调用会重绘屏幕的函数**（如 `setState`）—— 因为渲染循环里会 `pumpSerial()`，新字节就写在正在解析的那个缓冲上。

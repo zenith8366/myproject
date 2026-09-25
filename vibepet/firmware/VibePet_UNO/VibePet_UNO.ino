@@ -179,19 +179,10 @@ static void dbg(const __FlashStringHelper *text) {
 
 // ═══════════════════════════ 四、画字（中英文共用一套）═══════════════════════════
 
-// 取出某个字形第 r 行的 12 位点阵。
-//
-// 位图在 Flash 里是「13 行 × 12 位」连续打包的：第 r 行第 c 列落在第 r*12+c 位，
-// 字节内低位在前。因为 12×r 除以 8 的余数只会是 0 或 4，一行最多跨两个字节，
-// 所以下面这样一次读两个字节就够，不会越界（每字正好 20 字节）。
-static uint16_t cnFontRow(uint8_t glyph, uint8_t row) {
-  const uint8_t *p = &cn_font_bits[(uint16_t)glyph * CN_FONT_BPG];
-  uint16_t bit = (uint16_t)row * 12;
-  uint16_t byte_index = bit >> 3;
-  uint16_t value = pgm_read_byte(p + byte_index) |
-                   ((uint16_t)pgm_read_byte(p + byte_index + 1) << 8);
-  return (value >> (bit & 7)) & 0x0FFF;   // 位 11 是最左边的像素
-}
+// 取字形某一行的点阵：cnFontRow() 在 cn_font.h 里（由字库生成工具一并生成）。
+// 放在那儿是为了让电脑上的离线测试能验证同一份代码 —— 这里曾经踩过一个坑：
+// 参数写成 8 位整数，导致索引超过 255 的字全被截断成别的字（屏幕上表现为
+// 「有的汉字变成英文字母」）。详见 cn_font.h 里那段注释。
 
 // 从 UTF-8 字节流里取下一个字，指针前移。返回 0 表示到头了。
 //
@@ -272,13 +263,15 @@ static void drawGlyph(int16_t x, int16_t top, uint16_t code, uint16_t fg, uint16
       mask = 0;
       for (uint8_t c = 0; c < CN_FONT_W; c++) {
         bool on = edge || c == 0 || c == CN_FONT_W - 1;
-        if (on && c < width) mask |= (uint16_t)(0x800 >> c);
+        if (on && c < width) mask |= (uint16_t)(1 << c);
       }
     } else {
-      mask = cnFontRow((uint8_t)glyph, row);
+      mask = cnFontRow((uint16_t)glyph, row);
     }
+    // 位序：mask 的第 c 位就是第 c 列（位 0 = 最左）。别写成 0x800 >> c ——
+    // 那样读到的是镜像的列，整个字会左右翻转。
     for (uint8_t c = 0; c < width; c++) {
-      pixels[c] = (mask & (0x800 >> c)) ? fg : bg;
+      pixels[c] = (mask & (1 << c)) ? fg : bg;
     }
     tft.writePixels(pixels, width);
   }

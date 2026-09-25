@@ -429,10 +429,12 @@ def write_header(path, glyphs, font_src):
 // 格子：{CELL_W}×{CELL_H} 点阵，每字 {BYTES_PER_GLYPH} 字节，约占 {total_bytes} 字节 Flash
 //
 // 位图是「13 行 × 12 位」连续打包的位流：第 r 行第 c 列（都从 0 开始、c 从左往右）
-// 落在第 r*12+c 位上，字节内低位在前。取一行的做法见固件里的 cnFontRow()。
+// 落在第 r*12+c 位上，字节内低位在前。取一行的做法见下面的 cnFontRow()。
 
-#ifndef CN_FONT_H
-#define CN_FONT_H
+// 注意这个 include guard 的名字：不能叫 CN_FONT_H —— 那是「格子高度」宏的名字，
+// 两者撞名的话编译器会警告宏被重定义，而且高度值会把 guard 覆盖掉。
+#ifndef VIBEPET_CN_FONT_H
+#define VIBEPET_CN_FONT_H
 
 #include <Arduino.h>
 
@@ -456,6 +458,26 @@ static const uint8_t cn_font_bits[CN_FONT_COUNT * CN_FONT_BPG] PROGMEM = {{
 {wrap(bit_rows, 16)}
 }};
 
+// 取出某个字形第 row 行的 12 位点阵。
+//
+// ★ 位序约定：返回值的**第 c 位就是第 c 列**（位 0 = 最左边那一列，位 11 = 最右）。
+//   画的时候要写成 `(mask >> c) & 1` 或 `mask & (1 << c)`，别写成 `0x800 >> c`
+//   —— 那样读的是镜像的列，整个字会左右翻转（这个坑踩过一次）。
+//
+// 这个函数**故意放在生成的字库里**，而不是写在固件里：这样电脑上的离线测试
+// （tools/test_proto.cpp）能拿同一份代码去验证「打包」和「取行」是一致的。
+// 曾经这里踩过的另一个坑：参数一度写成 uint8_t，而字库有 {len(glyphs)} 个字
+// —— 索引超过 255 的那些字全被截断成了别的字，屏幕上表现是「有的汉字变成了
+// 英文字母」。所以下面的参数、偏移计算一律用 16 位以上。
+static inline uint16_t cnFontRow(uint16_t glyph, uint8_t row) {{
+  const uint8_t *p = &cn_font_bits[(uint32_t)glyph * CN_FONT_BPG];
+  uint16_t bit = (uint16_t)row * CN_FONT_W;
+  uint16_t byte_index = bit >> 3;   // 12 位一行，任意行最多跨 2 字节
+  uint16_t value = pgm_read_byte(p + byte_index) |
+                   ((uint16_t)pgm_read_byte(p + byte_index + 1) << 8);
+  return (value >> (bit & 7)) & 0x0FFF;
+}}
+
 // 按码点查字形序号；查不到返回 -1（调用方会画一个空心方框）
 static inline int16_t cnFontFind(uint16_t code_point) {{
   int16_t low = 0, high = CN_FONT_COUNT - 1;
@@ -468,7 +490,7 @@ static inline int16_t cnFontFind(uint16_t code_point) {{
   return -1;
 }}
 
-#endif  // CN_FONT_H
+#endif  // VIBEPET_CN_FONT_H
 """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
