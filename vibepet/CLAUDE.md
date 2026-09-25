@@ -10,10 +10,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `tools/gen_cn_font.py`：字库裁剪工具，`--verify` 黄金字形自检通过（`中` / `A` 逐位一致）
   - `tools/test_proto.cpp`：固件端**离线测试（55 例：协议解析 + 字库取行）**，用 g++ 在电脑上跑，不需要硬件
   - `pc/bridge_daemon.py` 的 `SerialTransport` + `pc/_smoke_test_serial.py`（9 例）
-  - Python 侧四套冒烟测试共 **43 例全通过**
+  - Python 侧四套冒烟测试共 **44 例全通过**
 - **屏幕已验证点亮**：`test-firmware/tfttest_uno` 在这块 UNO + 1.77" 屏上显示正常（用户实测）。
 - **固件已烧录并跑起来**（2026-09-25，COM9）：设备上电/复位后会发 `{"type":"hello","fw":"uno/1.0"}`，串口 115200 收发正常、中文经探针发送不乱码。
 - **Hook 已启用并实测**（2026-09-25）：设备按批准 → 命令放行；按拒绝 → 报 `PreToolUse:Bash hook error: Denied by VibePet`、命令被拦下。按钮位置见 `.claude/README.md` 末尾的提醒。
+- **修掉一个实测中暴露的 bug**（2026-09-25）：多条审批挤在一起时「有的审批不显示」—— 审批进行中 daemon 仍会下发状态，把屏幕上的审批卡顶掉。已改为审批期间只记账不下发，回归测试是用例 14。
 - **尚未做**：屏幕显示内容的实机观感（六态、中文折行、空心方框降级）、看门狗 LOST 与恢复；设计文档里标「待实测」的性能数字。
 - **v2.0 遗留已清理**（2026-09-25）：删掉了 `firmware/VibePet/`（901 行 ESP32 固件）、`vendor/TFT_eSPI/`（274 个文件，占仓库跟踪文件数的 94%）、`firmware/TFT_eSPI_User_Setup.h`、`test-firmware/tft_probe{,2}/`。仓库跟踪文件从 295 个降到 17 个，只剩有线版一条路线；要查旧实现请翻 git 历史。
 
@@ -22,7 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `pc/hook_client.py` —— Hook 客户端（短生命周期），仅用标准库。两条行为完全不同的路径：`PreToolUse` 审批（阻塞、向 stdout 输出决策）与其余事件的状态上报（非阻塞、stdout 零输出）。**本文件与传输方式无关，从 v2.0 到 v3.0 一行都不用改**
 - `pc/bridge_daemon.py` —— 桥接守护进程（常驻）。传输层是**鸭子类型的 4 方法契约**（`set_line_handler` / `connected` 属性 / `async ensure_connected` / `async send_line`），`Bridge` 与全部审批逻辑对此无感；`SerialTransport` 是串口实现（后台线程读 + `call_soon_threadsafe` 送回事件循环）
 - `firmware/VibePet_UNO/` —— UNO 固件与协议内核（**注释是写给新手看的，见下方说明**）
-- `pc/_smoke_test.py`（7 例）、`pc/_smoke_test_daemon.py`（13 例）、`pc/_smoke_test_state.py`（14 例）、`pc/_smoke_test_serial.py`（9 例）—— 冒烟测试，**均不依赖硬件**
+- `pc/_smoke_test.py`（7 例）、`pc/_smoke_test_daemon.py`（14 例）、`pc/_smoke_test_state.py`（14 例）、`pc/_smoke_test_serial.py`（9 例）—— 冒烟测试，**均不依赖硬件**（各自用 8790 / 8770 / 8771 这类**专用端口**，所以可以在真 daemon 常驻的同时跑）
 - `tools/test_proto.cpp` —— 固件端离线测试（55 例：协议解析 + 字库取行），g++ 编译即跑，**也不需要硬件**
 - `test-firmware/tfttest_uno/tfttest_uno.ino` —— **UNO + ST7735 的接线与库用法权威参考**（Adafruit_GFX + Adafruit_ST7735，引脚 CS=D10 / DC=D9 / RES=D8 / SCK=D13 / MOSI=D11 / 背光→3.3V）。主固件的显示部分照它写，且已实测点亮
 - `tools/cn_charset.txt` —— 字库字集清单；`tools/gen_cn_font.py` —— 字库裁剪工具
@@ -36,7 +37,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # 冒烟测试（都不需要硬件）
 python pc/_smoke_test.py           # hook_client 审批路径：7 例
-python pc/_smoke_test_daemon.py    # bridge_daemon：13 例，含端到端联调
+python pc/_smoke_test_daemon.py    # bridge_daemon：14 例，含端到端联调
 python pc/_smoke_test_state.py     # 事件 → 状态映射：14 例
 python pc/_smoke_test_serial.py    # 串口传输层：9 例，注入假串口，不需要真设备
 
@@ -248,6 +249,8 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 - **降级方向一律是拒绝**。审批超时 → `deny`；daemon 连接失败 / 超时 / 解析失败 → `deny`。任何异常都不得让 Hook 崩溃或放行。
 - **按钮按下后设备端立即本地切画面**（批准 → `working`/“已批准”，拒绝 → `idle`/“已拒绝”）并作废 `request_id`，不依赖电脑端回话。daemon 的去重模型是「记账 + dirty」（`_last_state` / `_state_dirty`），重连后由 `resend_current()` 补发当前画面：审批进行中重发审批卡（**沿用原 request_id**），否则重发最后一条 state。
 - **LOST 恢复语义**：恢复到最后有效状态；若那是 `needs_you` 则恢复为 `idle`（审批请求可能已超时失效，不显示过期卡片）。进入 LOST 时清空 `request_id`，失联期间按键不回传。
+- **审批进行中不下发状态**（daemon `send_state` 里的那条提前返回）：单槽审批（F9）期间屏幕上停着审批卡，此时任何状态更新都**只记账、不下发**。原因见下面这条实测 bug —— 它的回归测试是 `pc/_smoke_test_daemon.py` 的用例 14。
+  > **实测踩过的坑**：一条命令被批准后，Claude Code 立刻触发 `PostToolUse` 上报「working / Bash 完成」；若此刻屏幕上正停着**下一条**审批的卡片，这条状态就会把卡片顶掉 —— 用户看到的是 WORKING，根本不知道还有审批在等，那条只能静默超时被拒。症状是「多条审批挤在一起时，有的审批不显示」。
 - **同一时间只处理一个审批请求**（单槽 `current_request_id`，需求 F9）。多会话 FIFO 队列属于可扩展方向，不在第一版。
 - **设备端禁用清单**（每一条都会直接吃掉 2 KB RAM / 32 KB Flash 的预算）：`String` 类、ArduinoJson、任何 `malloc`/`new`、`float`/`double` 与 `sin()`/`sqrt()` 等浮点函数、裸字符串字面量（必须用 `F("...")` 放回 Flash）、循环里的 `delay()`。
 - **中文显示**：正文用自制 12px 子集字库（`firmware/VibePet_UNO/cn_font.h`，从 U8g2 的文泉驿点阵宋体裁出 **390 字**（95 个 ASCII + 295 个汉字），12×13 点阵、20 字节位图 + 2 字节索引 + 1 字节步进宽，**每个字约 23 字节 Flash**，合计约 9 KB）；标题类大字用 Adafruit_GFX 内置字体放大 2 倍。**未收录的字形画 12×13 空心方框**，不显示乱码也不静默省略。ASCII 与汉字走同一张表、同一套绘制路径。

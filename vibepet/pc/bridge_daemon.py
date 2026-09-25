@@ -637,6 +637,19 @@ class Bridge:
             # resend_current() 看到它会重新补发一遍。
             self._last_state = key        # 先记账，再尝试送达
             self._state_dirty = True
+            # ↓ 审批卡正停在屏幕上时，状态更新**不能下发** —— 否则会把卡片顶掉。
+            #
+            # 真实场景（实测踩过）：一条命令被批准、开始执行，Claude Code 随即触发
+            # PostToolUse 上报「working / Bash 完成」。而此刻屏幕上很可能正停着
+            # **下一条**审批的卡片 —— 那条状态一到，卡片就被刷掉，用户看到的是
+            # WORKING，根本不知道还有一条审批在等，它只能静默等到超时被拒。
+            #
+            # 这里只记账、不下发。_state_dirty 保持 True，所以审批结束后
+            # handle_approval 补发的那条状态不会被去重逻辑吞掉，屏幕会被拉回正轨。
+            if self._pending_request_id is not None:
+                debug(f"审批进行中，状态暂不下发（保持屏幕上的审批卡）: "
+                      f"{status} / {msg!r}")
+                return
             await self._send({"type": "state", "status": status, "msg": msg})
             self._state_dirty = False     # 发送成功，账本和屏幕又一致了
 

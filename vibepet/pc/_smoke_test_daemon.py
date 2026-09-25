@@ -469,6 +469,41 @@ try:
         problems.append(f"协议常量尚未实现: {exc}")
     record("整行长度预算（最坏情况 ≤ 320 字节）", problems)
 
+    # —— 用例 14：审批卡在屏幕上时，状态更新不许把它顶掉 ——
+    # 真实场景：一条 Bash 命令被批准执行完之后，Claude Code 会触发 PostToolUse，
+    # 于是又一条状态（working / Bash 完成）发下来。如果那一刻屏幕上正停着**下一条**
+    # 审批的卡片，这条状态就会把卡片刷掉 —— 用户根本没看见那条审批，
+    # 它只能静默等到 120 秒超时、被当成拒绝。
+    # （这正是「多条审批挤在一起时有的审批不显示」的根因。）
+    async def drive_card_protection():
+        transport = RecordingTransport()
+        bridge = Bridge(transport, 1.0)
+        task = asyncio.create_task(bridge.handle_approval(
+            {"tool_name": "Bash", "tool_input": {"command": "echo A"}}))
+        await asyncio.sleep(0.05)
+        rid = bridge._pending_request_id
+        if rid is None:
+            return None, transport.sent
+        before = len(transport.sent)
+        await bridge.send_state("working", "Bash 完成")   # 模拟 PostToolUse
+        during = transport.sent[before:]
+        bridge.inject_button({"type": "button", "request_id": rid, "action": "approve"})
+        await task
+        return during, transport.sent
+
+    problems = []
+    try:
+        during, _ = asyncio.run(drive_card_protection())
+        if during is None:
+            problems.append("审批没有进入等待状态，用例无法进行")
+        elif any(m.get("type") == "state" for m in during):
+            problems.append(
+                "审批进行中仍下发了状态，会把屏幕上的审批卡顶掉，"
+                f"用户看不到那条审批: {during}")
+    except Exception as exc:
+        problems.append(f"审批卡保护测试异常: {exc!r}")
+    record("审批进行中不下发状态（卡片不被顶掉）", problems)
+
 finally:
     daemon_proc.terminate()
     try:

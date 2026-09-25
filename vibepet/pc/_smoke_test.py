@@ -14,7 +14,10 @@ import time
 sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore
 
 CLIENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hook_client.py")
-PORT = 8765
+# 测试专用端口。**不能借用 8765** —— 那是真 daemon 的端口，而 daemon 现在是常驻的
+# （装了 Hook 就得一直开着），占它会让这条测试直接报 WinError 10013 跑不起来。
+# 另外两个冒烟测试也是同样的做法（8770 / 8771）。
+PORT = 8790
 # 故意带中文，验证 UTF-8 链路（中文 Windows 上 GBK 解码会在这里炸）
 HOOK_INPUT = {
     "session_id": "test-session",
@@ -61,6 +64,9 @@ class FakeDaemon:
 def run_client(env_extra=None, raw_input=None):
     """raw_input 给「畸形输入」用例直接喂原始字节，其余用例走标准 HOOK_INPUT。"""
     env = os.environ.copy()
+    # 让客户端连到测试自己的假 daemon，而不是本机那个真 daemon（8765）。
+    # 放在 env_extra 之前：个别用例要用别的端口（比如「连不上」那条用 8799）能覆盖。
+    env["VIBEPET_PORT"] = str(PORT)
     env.update(env_extra or {})
     payload = (raw_input if raw_input is not None
                else json.dumps(HOOK_INPUT, ensure_ascii=False).encode("utf-8"))

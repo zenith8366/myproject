@@ -3,7 +3,7 @@
 把 AI 编程助手的工作状态搬到桌面上。
 
 > **当前状态**：本版是 **v3.0（USB 有线版）**，设计与代码都已经落地 ——
-> 固件能编译（Flash 85%、RAM 62%，零警告），电脑端测试 43 例、协议内核离线测试
+> 固件能编译（Flash 85%、RAM 62%，零警告），电脑端测试 44 例、协议内核离线测试
 > 55 例全部通过。**固件已烧进板子跑起来了**，正在做真机联调。
 > 进度详见文末的[项目状态](#项目状态)。v2.0 的无线（BLE）路线已放弃（原因见设计文档 1.2）。
 
@@ -425,7 +425,7 @@ python pc/bridge_daemon.py --timeout 300     # 改成 5 分钟
 
 ```bash
 python pc/_smoke_test.py           # 7 项：审批路径
-python pc/_smoke_test_daemon.py    # 13 项：含并发、去重、重连补发、端到端
+python pc/_smoke_test_daemon.py    # 14 项：含并发、去重、重连补发、审批卡不被顶掉、端到端
 python pc/_smoke_test_state.py     # 14 项：状态映射
 python pc/_smoke_test_serial.py    # 9 项：串口传输层（注入假串口，不需要真设备）
 
