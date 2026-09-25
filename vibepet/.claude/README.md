@@ -1,32 +1,44 @@
 # VibePet 的 Claude Code Hook 配置
 
-本目录的 `settings.json` 把 VibePet 挂在 Claude Code 的 6 个事件上，**目前全部处于注释状态，不会生效**。
+本目录的 `settings.json` 把 VibePet 挂在 Claude Code 的 8 个事件上，**当前处于启用状态**
+（2026-09-25 启用并实测通过）。
 
-## 为什么用 `# ` 而不是 JSON 注释
+## 各事件与超时
 
-`settings.json` 是**严格 JSON**：`//` 和 `/* */` 都不被接受。而且后果比"忽略这一行"严重——
-整个文件会被判定无效并**丢弃**，文件里的 hooks、permissions、statusLine 会**一起**失效。
-官方文档明确写着不接受注释（"because Claude Code doesn't accept comments in a settings file"）。
+| 事件 | matcher | 行为 | timeout |
+|---|---|---|---|
+| `PreToolUse` | `Bash` | **阻塞**等待设备按钮，向 stdout 输出 allow / deny | **150 秒** |
+| `PostToolUse` | —— | 上报 `working`；工具失败时报 `error` | 5 秒 |
+| `UserPromptSubmit` | —— | 上报 `working`（思考中） | 5 秒 |
+| `Stop` | —— | 上报 `done`（任务完成） | 5 秒 |
+| `SessionStart` / `SessionEnd` | —— | 上报 `idle` | 5 秒 |
+| `SubagentStop` | —— | 上报 `working`（子任务完成） | 5 秒 |
+| `PreCompact` | —— | 上报 `working`（压缩上下文） | 5 秒 |
 
-所以这里走了另一条路：hook 的 `command` 值是交给 shell 执行的，而 shell 认 `#`。
-配置本身是合法 JSON，命令却是被注释掉的：
+**关于 `timeout`**：这三个字不能省。不写的话走的是默认超时（比 VibePet 的 120 秒审批窗口
+还短），等待会被提前掐死 —— 那时 `hook_client.py` 来不及输出决策，等于白白丢掉一次审批。
+`PreToolUse` 给 **150 秒**是刻意留出的余量：客户端自己等 130 秒、daemon 等 120 秒，
+150 > 130 > 120，保证「超时降级为拒绝」这出戏由 daemon 演完，而不是被外部杀掉。
+
+状态类事件给 5 秒：它们挂在每一次工具调用的路径上，绝不能拖慢 Claude Code
+（`hook_client.py` 内部实际只等 1 秒就放弃）。
+
+## 启用与关闭
+
+**关闭**（临时禁用某个或全部 hook）：把对应 `command` 的值前面加 `# `，例如
 
 ```json
 "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
 ```
 
-实测：bash 与 PowerShell 下执行该命令都是**退出码 0、stdout 零字节**，完全等同于这个 hook 不存在，
-不会污染 Hook 通道，也不会产生报错噪音。
+为什么可以这么注释：hook 的 `command` 值是**交给 shell 执行的**，而 shell 认 `#`。
+实测 bash 下 `# ...` 是退出码 0、stdout 零字节的安全 no-op。
 
-## 启用方式
+> ⚠️ **绝对不要往 `settings.json` 里写 JSON 注释**（`//` 或 `/* */`）。Claude Code 用严格
+> JSON 解析：一个 `//` 会让**整个文件被丢弃**，连带里面的 hooks / permissions / statusLine
+> 全部失效 —— 不是只忽略那一行。要注释就注释 `command` 的值。
 
-把 `settings.json` 里 6 处 `"# python ..."` 的 `# `（井号 + 一个空格）删掉，变成：
-
-```json
-"command": "python \"E:/myproject/vibepet/pc/hook_client.py\""
-```
-
-保存即生效。在 Claude Code 里输入 `/hooks` 可以查看当前实际生效的 hook 列表。
+**查看当前生效的 hook**：在 Claude Code 里输入 `/hooks`。
 
 ## ⚠️ 启用前必须做到三件事
 
@@ -36,45 +48,45 @@
 python pc/bridge_daemon.py
 ```
 
-VibePet 的降级策略是**拿不准就拒绝**。daemon 不在时，`PreToolUse` 会拒绝所有匹配的 Bash 调用——
-这是安全设计而不是 bug，但会让你以为 Claude Code 坏了。
+VibePet 的降级策略是**拿不准就拒绝**。daemon 不在时，`PreToolUse` 会拒绝所有匹配的 Bash
+调用 —— 这是安全设计而不是 bug，但会让你以为 Claude Code 坏了。
 
-### 2. 注意与 Clawd on Desk 的并存
+### 2. 烧录设备前先停掉 daemon
 
-用户级配置 `~/.claude/settings.json` 里已经挂了一套 Clawd on Desk 的 hook，它同样占用
-`PreToolUse`、`PostToolUse`、`Stop`、`SessionStart/End`、`UserPromptSubmit` 等事件。
-Claude Code 会执行所有匹配的 hook，所以启用后两者**并存**：
-
-- **状态上报类**（PostToolUse 等）互不干扰，两个设备都会跟着更新，无需处理；
-- **`PreToolUse` 需要实测确认**：Clawd on Desk 的 timeout 只有 5 秒，而 VibePet 的审批最长 120 秒。
-  两者都注册在同一事件上，最终行为取决于 Claude Code 对多个 hook 决策的合并策略。
-
-### 3. 烧录设备前先停掉 daemon
-
-v3.0 改用 USB 串口后，**那块 UNO 的串口同时是数据链路和烧录口，同一时刻只能有一个程序拿着它**：
+设备那根串口**同时是数据链路和烧录口**，同一时刻只能被一个程序拿着：
 
 - 烧录前：在 daemon 窗口按 `Ctrl+C`，烧完再启动；
-- 用 Arduino IDE 的**串口监视器**调试设备时同理 —— 开着它，daemon 就打不开串口
-  （会明确报「端口被占用」而不是静默重试）。
+- 用 Arduino IDE 的**串口监视器**调试设备时同理 —— 开着它，daemon 就打不开串口；
+- 不听劝的后果实测过：`avrdude: cannot open port COM9: 拒绝访问`，就是 daemon 占着。
 
 顺带一提：**打开串口会让 UNO 复位一次**（USB 转串口芯片拉 DTR），约 2 秒后进入固件。
 这不是故障，daemon 会等它启动完再把当前画面补发过去。
 
-## 各事件对应的行为
+### 3. 与 Clawd on Desk 并存（已确认不冲突）
 
-| 事件 | 行为 |
+用户级配置 `~/.claude/settings.json` 里挂着 Clawd on Desk 的一整套 hook，事件几乎完全重叠。
+**结论：两者可以并存，不会抢决策权**，原因有两条：
+
+1. **Clawd 的 hook 全部带 `"async": true`** —— 后台执行、不阻塞、不产生决策，只是给自己的
+   界面推状态。VibePet 的 `PreToolUse` 是唯一做决策的那个。
+2. Clawd 另有一个 `PermissionRequest` 的 HTTP hook（`127.0.0.1:23333`）。它和 VibePet 用的是
+   **两套不同机制**：VibePet 在 `PreToolUse` 阶段就给出 allow / deny，一旦 allow，
+   Claude Code 直接放行、不会走到权限询问那一步（所以 Clawd 的权限弹窗也不会出现）。
+   想要 Clawd 的弹窗，就得先把 VibePet 的 hook 关掉。
+
+## 实测记录（2026-09-25）
+
+| 验证项 | 结果 |
 |---|---|
-| `PreToolUse`（matcher: `Bash`） | 阻塞等待物理按钮，向 stdout 输出 allow / deny |
-| `PostToolUse` | 上报 `working`；工具失败时报 `error` |
-| `UserPromptSubmit` | 上报 `working` |
-| `Stop` | 上报 `done` |
-| `SessionStart` / `SessionEnd` | 上报 `idle` |
+| 配置文件被加载 | ✅ 改完不重启也生效（Claude Code 监听 `.claude/`） |
+| hook 里 `python` 可用 | ✅ 标记文件记下 `hook_client 退出码=0` |
+| **allow 路径** | ✅ 设备按批准 → 命令放行执行 |
+| **deny 路径** | ✅ 设备按拒绝 → 报 `PreToolUse:Bash hook error: Denied by VibePet`，命令未执行 |
 
-六种状态里的 `heartbeat_lost` 不在这里配——由设备端看门狗自行判断（5 秒收不到心跳即显示 `LOST`）。
-
-## 禁用
-
-把 `# ` 加回去，或直接删除本目录下的 `settings.json`。
+**按钮位置提醒**：实测发现，接在 **D2** 上的按钮是「批准」（屏幕显示**已批准**），
+接在 **D3** 上的是「拒绝」（屏幕显示**已拒绝**）。两个按钮哪个在左哪个在右取决于你怎么接的线 ——
+拿不准就在一次审批进行中按一下，屏幕会立刻告诉你它是哪个。想让它们对调：把两根杜邦线
+在 D2/D3 上换一下即可（固件不用动）。
 
 ## 这个文件为什么放在这里
 
