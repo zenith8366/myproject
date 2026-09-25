@@ -7,9 +7,9 @@
  * 好在解析内核是纯计算、不碰硬件的，所以可以用一个假的 Arduino.h
  * （tools/proto_test/Arduino.h）把它搬到电脑上编译，跑一张表驱动测试。
  *
- * 跑法（在仓库根目录）：
- *     g++ -I tools/proto_test -I firmware/VibePet_UNO tools/test_proto.cpp -o proto_test \
- *         && ./proto_test
+ * 跑法（在仓库根目录；可执行文件写到临时目录，别在仓库里留垃圾）：
+ *     g++ -I tools/proto_test -I firmware/VibePet_UNO tools/test_proto.cpp -o /tmp/proto_test \
+ *         && /tmp/proto_test
  * 退出码 0 = 全通过；非 0 = 有用例失败（失败的那条会打印期望与实际）。
  */
 

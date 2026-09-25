@@ -46,8 +46,9 @@ python tools/serial_probe.py COM7
 #   直接敲一行 JSON 回车也行；设备回传的每一行都会带时间戳打印出来
 
 # 协议内核的离线测试（也不需要硬件！用电脑上的 g++ 编译固件里的那份解析代码）
-g++ -I tools/proto_test -I firmware/VibePet_UNO tools/test_proto.cpp -o proto_test \
-  && ./proto_test                  # 52 例：转义、\uXXXX、嵌套、UTF-8 边界、行重组
+# 可执行文件写到临时目录 —— 别落在仓库里，那会平白多个未跟踪文件
+g++ -I tools/proto_test -I firmware/VibePet_UNO tools/test_proto.cpp -o /tmp/proto_test \
+  && /tmp/proto_test               # 52 例：转义、\uXXXX、嵌套、UTF-8 边界、行重组
 
 # 语法检查
 python -m py_compile pc/hook_client.py pc/bridge_daemon.py
@@ -61,6 +62,11 @@ CLI="/d/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
   --build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" \
   --build-path firmware/VibePet_UNO/build firmware/VibePet_UNO
 
+# ── 也可以用 Arduino IDE 的「上传」按钮（本项目没有 --libraries 之类的坑）──
+#   IDE 读的是同一份 Arduino 核心，唯一差别是串口接收缓冲 64 而不是 256 字节：
+#   按固件「连续阻塞 ≤ 3ms」的纪律，最多只会攒下约 29 字节，64 够用。
+#   代价与收益：缓冲小的那份反而给栈多留了 192 字节。两条路都能用。
+#
 # 编译 + 烧录（COM 口号用 arduino-cli board list 查；烧录前必须先停掉 daemon）
 "$CLI" compile --fqbn arduino:avr:uno \
   --build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" \

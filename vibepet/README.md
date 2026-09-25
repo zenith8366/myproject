@@ -213,9 +213,24 @@ CLI="/d/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
 > `Global variables use 1282 bytes`；如果显示 `1090 bytes`，说明 `-D` 没生效，
 > 加回 `--build-path` 再编一次。
 
-> 也可以用 Arduino IDE 的「上传」按钮（比 v2.0 舒服——那时候必须走命令行，因为要带
-> `--libraries` 参数）。用按钮上传时串口缓冲是默认的 64 字节，日常够用，只是在高频
-> 状态下更容易丢行。
+### 或者：用 Arduino IDE 的「上传」按钮（更省事）
+
+v3.0 换了主控之后，**Arduino IDE 的上传按钮可以直接用了** —— v2.0 必须走命令行，
+因为要带 `--libraries` 参数指向仓库自带的 TFT_eSPI，而 IDE 不会带这个参数。
+
+1. 用 Arduino IDE 打开 `firmware/VibePet_UNO/VibePet_UNO.ino`
+   （同目录的 `cn_font.h` 与 `vibepet_proto.h` 会作为标签页一起打开，不用管它们）
+2. 工具 → 开发板 → **Arduino Uno**；工具 → 端口 → 选设备所在的 COM 口
+3. 库管理器里装好上表那两个库
+4. **先停掉 daemon**（串口同一时刻只能被一个程序拿着），点「上传」
+
+> **和命令行的唯一区别**：串口接收缓冲是默认的 64 字节，而不是命令行那条
+> `-DSERIAL_RX_BUFFER_SIZE=256` 指定的 256 —— 这个参数在 IDE 里没有对应的设置项。
+> **不影响使用**：固件里「任何一处连续阻塞不超过 3 毫秒」的纪律保证了屏幕上最费时的
+> 一次绘制最多只会攒下约 29 字节，64 字节够用（还因此多留了 192 字节给栈）。
+> 命令行那条 256 只是多一层保险。
+
+> 用 IDE 时别同时开着「串口监视器」—— 它会占住串口，daemon 就连不上了。
 
 > ⚠️ **烧录前先停掉 daemon**，否则串口被占用，上传会失败。同理，别同时开着 Arduino IDE
 > 的串口监视器。
@@ -411,8 +426,8 @@ python pc/_smoke_test_state.py     # 14 项：状态映射
 python pc/_smoke_test_serial.py    # 9 项：串口传输层（注入假串口，不需要真设备）
 
 # 协议解析内核的离线测试（同样不需要硬件：用电脑上的 g++ 编译固件里的解析代码）
-g++ -I tools/proto_test -I firmware/VibePet_UNO tools/test_proto.cpp -o proto_test \
-  && ./proto_test                  # 52 项：转义、中文、嵌套、分片、超长行
+g++ -I tools/proto_test -I firmware/VibePet_UNO tools/test_proto.cpp -o /tmp/proto_test \
+  && /tmp/proto_test               # 52 项：转义、中文、嵌套、分片、超长行
 ```
 
 ## 项目状态
