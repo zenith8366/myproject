@@ -137,6 +137,7 @@ void controllerTaskFunc(void *argument);
   * @retval int
   */
 int main(void)
+
 {
 
   /* USER CODE BEGIN 1 */
@@ -403,6 +404,7 @@ void StartDefaultTask(void *argument)
 void KeyTaskFunc(void *argument)
 {
   /* USER CODE BEGIN KeyTaskFunc */
+
   (void)argument;
   calculator_key_task();
   /* USER CODE END KeyTaskFunc */

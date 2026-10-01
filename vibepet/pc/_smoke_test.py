@@ -26,6 +26,17 @@ HOOK_INPUT = {
     "tool_input": {"command": "rm -rf /tmp/构建缓存", "description": "删除构建缓存"},
 }
 
+# 非 Bash 审批（PermissionRequest 事件）的输入样本：模拟一次 Write 工具的
+# 权限请求 —— 正是「屏幕上不显示审批卡」问题里那类事件。同样带中文验证编码。
+# 注意 tool_input 里没有 command 字段 —— daemon 会退到 file_path 做摘要，
+# 这里顺带验证「非 Bash 工具的参数也能原样转发、不丢字段」。
+HOOK_INPUT_PERM = {
+    "session_id": "test-session",
+    "hook_event_name": "PermissionRequest",
+    "tool_name": "Write",
+    "tool_input": {"file_path": "E:/myproject/vibepet/临时文件.txt", "content": "hello"},
+}
+
 
 class FakeDaemon:
     """一次性 TCP 服务端，模拟 bridge_daemon 的应答。"""
@@ -61,18 +72,20 @@ class FakeDaemon:
         self.srv.close()
 
 
-def run_client(env_extra=None, raw_input=None):
-    """raw_input 给「畸形输入」用例直接喂原始字节，其余用例走标准 HOOK_INPUT。"""
+def run_client(env_extra=None, raw_input=None, hook_input=None):
+    """raw_input 给「畸形输入」用例直接喂原始字节；hook_input 换用别的输入样本
+    （比如 PermissionRequest）；两者都不给就走标准 HOOK_INPUT。"""
     env = os.environ.copy()
     # 让客户端连到测试自己的假 daemon，而不是本机那个真 daemon（8765）。
     # 放在 env_extra 之前：个别用例要用别的端口（比如「连不上」那条用 8799）能覆盖。
     env["VIBEPET_PORT"] = str(PORT)
     env.update(env_extra or {})
-    payload = (raw_input if raw_input is not None
-               else json.dumps(HOOK_INPUT, ensure_ascii=False).encode("utf-8"))
+    if raw_input is None:
+        sample = hook_input if hook_input is not None else HOOK_INPUT
+        raw_input = json.dumps(sample, ensure_ascii=False).encode("utf-8")
     return subprocess.run(
         [sys.executable, CLIENT],
-        input=payload,
+        input=raw_input,
         capture_output=True,
         env=env,
     )
@@ -82,11 +95,14 @@ results = []
 
 
 def check(name, expected_decision, response=None, reply=True, env_extra=None,
-          expect_forward=True, start_daemon=True, raw_input=None):
+          expect_forward=True, start_daemon=True, raw_input=None,
+          hook_input=None, event="PreToolUse"):
+    if hook_input is None:
+        hook_input = HOOK_INPUT
     daemon = FakeDaemon(response, reply) if start_daemon else None
     time.sleep(0.35)
     try:
-        proc = run_client(env_extra, raw_input)
+        proc = run_client(env_extra, raw_input, hook_input)
     finally:
         if daemon:
             daemon.close()
@@ -95,17 +111,32 @@ def check(name, expected_decision, response=None, reply=True, env_extra=None,
     out = proc.stdout.decode("utf-8")
     problems = []
 
-    # 断言 1：stdout 必须恰好是一行合法 Hook JSON
+    # 断言 1：stdout 必须恰好是一行合法 Hook JSON，且决策字段与事件类型匹配。
+    # 两个审批事件的协议不同（PreToolUse 用 permissionDecision，
+    # PermissionRequest 用 decision.behavior），串了 Claude Code 就解析不到决策，
+    # 所以字段名对不上也算失败，而不是只看行为值。
     lines = [ln for ln in out.splitlines() if ln.strip()]
+    decision = None
     if len(lines) != 1:
         problems.append(f"stdout 应为 1 行，实际 {len(lines)} 行: {out!r}")
-        decision = None
     else:
         try:
-            decision = json.loads(lines[0])["hookSpecificOutput"]["permissionDecision"]
+            hso = json.loads(lines[0])["hookSpecificOutput"]
+            if hso.get("hookEventName") != event:
+                problems.append(
+                    f"hookEventName 应为 {event!r}，实际 {hso.get('hookEventName')!r}")
+            if event == "PermissionRequest":
+                decision = hso["decision"]["behavior"]
+                if "permissionDecision" in hso:
+                    problems.append(f"PermissionRequest 输出混入 PreToolUse 字段: {lines[0]!r}")
+                if decision == "deny" and not hso["decision"].get("message"):
+                    problems.append("PermissionRequest deny 缺少 message 字段")
+            else:
+                decision = hso["permissionDecision"]
+                if "decision" in hso:
+                    problems.append(f"PreToolUse 输出混入 PermissionRequest 字段: {lines[0]!r}")
         except Exception as exc:
-            problems.append(f"stdout 不是合法 Hook JSON ({exc}): {out!r}")
-            decision = None
+            problems.append(f"stdout 不是预期的 Hook JSON（{exc}）: {out!r}")
 
     # 断言 2：决策符合预期
     if decision is not None and decision != expected_decision:
@@ -118,7 +149,7 @@ def check(name, expected_decision, response=None, reply=True, env_extra=None,
         else:
             try:
                 forwarded = json.loads(daemon.received)
-                if forwarded != HOOK_INPUT:
+                if forwarded != hook_input:
                     problems.append(f"转发内容不一致: {forwarded!r}")
             except Exception as exc:
                 problems.append(f"转发内容不是合法 JSON ({exc}): {daemon.received!r}")
@@ -138,6 +169,21 @@ check("daemon 不回包 -> 超时 deny", "deny", None, reply=False,
       env_extra={"VIBEPET_TIMEOUT": "2"}, expect_forward=False)
 check("daemon 未运行 -> deny", "deny", env_extra={"VIBEPET_PORT": "8799"},
       expect_forward=False, start_daemon=False)
+
+# —— PermissionRequest：非 Bash 工具的权限审批路径 ——
+# 与 PreToolUse 走同一个进程、同一条审批链路，区别只在 stdout 的决策格式。
+# 这组用例盯住两件事：格式没串（decision.behavior vs permissionDecision）、
+# 降级路径（daemon 不在时）同样是 deny。真机之前先把这两条钉死。
+check("PermissionRequest approve -> allow",
+      "allow", {"action": "approve"},
+      hook_input=HOOK_INPUT_PERM, event="PermissionRequest")
+check("PermissionRequest deny -> deny（带 message）",
+      "deny", {"action": "deny"},
+      hook_input=HOOK_INPUT_PERM, event="PermissionRequest")
+check("PermissionRequest daemon 未运行 -> deny",
+      "deny", env_extra={"VIBEPET_PORT": "8799"},
+      expect_forward=False, start_daemon=False,
+      hook_input=HOOK_INPUT_PERM, event="PermissionRequest")
 
 # —— 畸形输入不得让 Hook 崩溃 ——
 # 崩溃（非零退出码 + stdout 零字节）等于「不输出决策」，而 Claude Code 对

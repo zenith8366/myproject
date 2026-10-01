@@ -10,25 +10,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `tools/gen_cn_font.py`：字库裁剪工具，`--verify` 黄金字形自检通过（`中` / `A` 逐位一致）
   - `tools/test_proto.cpp`：固件端**离线测试（55 例：协议解析 + 字库取行）**，用 g++ 在电脑上跑，不需要硬件
   - `pc/bridge_daemon.py` 的 `SerialTransport` + `pc/_smoke_test_serial.py`（9 例）
-  - Python 侧四套冒烟测试共 **44 例全通过**
+  - Python 侧四套冒烟测试共 **47 例全通过**（`_smoke_test.py` 已扩到 10 例，含 PermissionRequest 用例）
+- **非 Bash 审批已接入**（2026-10-01）：`hook_client.py` 支持 `PermissionRequest` 事件（非 Bash 工具弹权限窗时触发），按 `decision.behavior` 输出决策（与 PreToolUse 的 `permissionDecision` 是两套格式，不能串）；配置已就绪、**待真机联调**（`.claude/settings.json` 的 9 个 hook 当前全部注释，联调时启用）。与 Clawd on Desk 并存的实测结论见 `.claude/README.md`
 - **屏幕已验证点亮**：`test-firmware/tfttest_uno` 在这块 UNO + 1.77" 屏上显示正常（用户实测）。
 - **固件已烧录并跑起来**（2026-09-25，COM9）：设备上电/复位后会发 `{"type":"hello","fw":"uno/1.0"}`，串口 115200 收发正常、中文经探针发送不乱码。
 - **Hook 已启用并实测**（2026-09-25）：设备按批准 → 命令放行；按拒绝 → 报 `PreToolUse:Bash hook error: Denied by VibePet`、命令被拦下。按钮位置见 `.claude/README.md` 末尾的提醒。
 - **修掉一个实测中暴露的 bug**（2026-09-25）：多条审批挤在一起时「有的审批不显示」—— 审批进行中 daemon 仍会下发状态，把屏幕上的审批卡顶掉。已改为审批期间只记账不下发，回归测试是用例 14。
-- **尚未做**：屏幕显示内容的实机观感（六态、中文折行、空心方框降级）、看门狗 LOST 与恢复；设计文档里标「待实测」的性能数字。
+- **尚未做**：屏幕显示内容的实机观感（六态、中文折行、空心方框降级）、看门狗 LOST 与恢复；设计文档里标「待实测」的性能数字；**非 Bash 审批的真机联调**，以及交互类工具（`AskUserQuestion` / `ExitPlanMode`）在设备审批下的行为确认（hook 的 allow 不足以跳过它们的原生交互，可能需要豁免）。
 - **v2.0 遗留已清理**（2026-09-25）：删掉了 `firmware/VibePet/`（901 行 ESP32 固件）、`vendor/TFT_eSPI/`（274 个文件，占仓库跟踪文件数的 94%）、`firmware/TFT_eSPI_User_Setup.h`、`test-firmware/tft_probe{,2}/`。仓库跟踪文件从 295 个降到 17 个，只剩有线版一条路线；要查旧实现请翻 git 历史。
 
 ## 仓库现状
 
-- `pc/hook_client.py` —— Hook 客户端（短生命周期），仅用标准库。两条行为完全不同的路径：`PreToolUse` 审批（阻塞、向 stdout 输出决策）与其余事件的状态上报（非阻塞、stdout 零输出）。**本文件与传输方式无关，从 v2.0 到 v3.0 一行都不用改**
+- `pc/hook_client.py` —— Hook 客户端（短生命周期），仅用标准库。两条行为完全不同的路径：`PreToolUse` / `PermissionRequest` 审批（阻塞、按事件各自的格式输出决策）与其余事件的状态上报（非阻塞、stdout 零输出）。**与传输方式无关**（v2.0→v3.0 的传输换代没改一行；2026-10-01 为接入 PermissionRequest 扩展了事件分派与输出格式）
 - `pc/bridge_daemon.py` —— 桥接守护进程（常驻）。传输层是**鸭子类型的 4 方法契约**（`set_line_handler` / `connected` 属性 / `async ensure_connected` / `async send_line`），`Bridge` 与全部审批逻辑对此无感；`SerialTransport` 是串口实现（后台线程读 + `call_soon_threadsafe` 送回事件循环）
 - `firmware/VibePet_UNO/` —— UNO 固件与协议内核（**注释是写给新手看的，见下方说明**）
-- `pc/_smoke_test.py`（7 例）、`pc/_smoke_test_daemon.py`（14 例）、`pc/_smoke_test_state.py`（14 例）、`pc/_smoke_test_serial.py`（9 例）—— 冒烟测试，**均不依赖硬件**（各自用 8790 / 8770 / 8771 这类**专用端口**，所以可以在真 daemon 常驻的同时跑）
+- `pc/_smoke_test.py`（10 例）、`pc/_smoke_test_daemon.py`（14 例）、`pc/_smoke_test_state.py`（14 例）、`pc/_smoke_test_serial.py`（9 例）—— 冒烟测试，**均不依赖硬件**（各自用 8790 / 8770 / 8771 这类**专用端口**，所以可以在真 daemon 常驻的同时跑）
 - `tools/test_proto.cpp` —— 固件端离线测试（55 例：协议解析 + 字库取行），g++ 编译即跑，**也不需要硬件**
 - `test-firmware/tfttest_uno/tfttest_uno.ino` —— **UNO + ST7735 的接线与库用法权威参考**（Adafruit_GFX + Adafruit_ST7735，引脚 CS=D10 / DC=D9 / RES=D8 / SCK=D13 / MOSI=D11 / 背光→3.3V）。主固件的显示部分照它写，且已实测点亮
 - `tools/cn_charset.txt` —— 字库字集清单；`tools/gen_cn_font.py` —— 字库裁剪工具
 - `README.md` —— **面向使用者**的文档（安装 / 日常使用 / 排障），受众与 CLAUDE.md 不同。改了用户可见的行为（命令行参数、状态含义、接线、安装步骤）要同步更新它
-- `.claude/settings.json` —— Claude Code Hook 配置，**已启用**（8 个事件：`PreToolUse` 做审批 + 7 个状态上报，每个都带显式 `timeout`）。allow / deny 两条路径都实测通过。启用与关闭方式、Clawd on Desk 的并存结论（它的 hook 全是 async，不抢决策权）见 `.claude/README.md`
+- `.claude/settings.json` —— Claude Code Hook 配置（**9 个事件：`PreToolUse` + `PermissionRequest` 做审批、7 个状态上报**，每个都带显式 `timeout`）。**当前 9 个 hook 全部为注释状态**（2026-10-01 起，等真机联调时启用）。启用与关闭方式、Clawd on Desk 并存结论（2026-10-01 实测不冲突）见 `.claude/README.md`
 
 **注释密度是刻意的，不要删**：`pc/hook_client.py`、`pc/bridge_daemon.py`、`firmware/VibePet_UNO/VibePet_UNO.ino` 三个核心文件的注释是写给新手看的（每个函数前有一段大白话说明「这段在干嘛、为什么需要它」），密度高于一般工程代码。这是本项目目标读者（没写过嵌入式 / 异步程序的人）决定的 —— **不要以「注释太多/太啰嗦」为由删减**。
 
@@ -36,7 +37,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # 冒烟测试（都不需要硬件）
-python pc/_smoke_test.py           # hook_client 审批路径：7 例
+python pc/_smoke_test.py           # hook_client 审批路径：10 例（含 PermissionRequest）
 python pc/_smoke_test_daemon.py    # bridge_daemon：14 例，含端到端联调
 python pc/_smoke_test_state.py     # 事件 → 状态映射：14 例
 python pc/_smoke_test_serial.py    # 串口传输层：9 例，注入假串口，不需要真设备
@@ -177,6 +178,7 @@ USB 串口 115200 8N1（设备的 D0/D1，经板载 USB 转串口芯片枚举为
 | Hook 事件 | 状态 | 屏幕文字 |
 |---|---|---|
 | `PreToolUse` | 不发 state | 改走 `approval_request`，阻塞等按钮 |
+| `PermissionRequest` | 不发 state | 同 `PreToolUse`（非 Bash 的权限弹窗走这里） |
 | `PostToolUse` 成功 | `working` | `<工具名> 完成` |
 | `PostToolUse` 失败 | `error` | `<工具名> 出错` |
 | `SessionStart` / `SessionEnd` | `idle` | 会话开始 / 会话结束 |
@@ -188,7 +190,7 @@ USB 串口 115200 8N1（设备的 D0/D1，经板载 USB 转串口芯片枚举为
 
 **两条路径的行为差异是刻意的，改动时不要混为一谈**：
 
-- `PreToolUse` 阻塞等按钮（最长 120 s），**必须**向 stdout 输出 allow / deny。
+- `PreToolUse` / `PermissionRequest` 阻塞等按钮（最长 120 s），**必须**向 stdout 输出各自格式的决策（allow / deny）。
 - 状态事件超时只有 1 s，失败静默放弃，**stdout 必须零字节** —— 它挂在每一次工具调用
   的路径上，多耗一秒就是实打实地拖慢 Claude Code；多余输出则会污染 Hook 通道。
 
@@ -243,6 +245,7 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 
 ## 硬性约束
 
+- **hook 配置只改本项目的 `.claude/settings.json`**。用户级全局配置（`~/.claude/settings.json`，含 Clawd on Desk 的 hook）**不得改动、保持原样**（用户 2026-10-01 明确要求）；确实需要全局改动时先询问用户。任务收尾时清点并删除过程产生的临时文件。
 - **`hook_client.py` 的 stdout 必须只输出 Hook JSON**。所有调试信息一律写 stderr。stdout 一旦被日志污染，Hook 解析失败会直接破坏审批链路 —— 这是设计文档 8.1 列为「高影响」的风险。
 - **Windows 编码**：Python 文本流在中文 Windows 上默认跟随系统 locale（GBK），一旦写入非 GBK 字符就抛 `UnicodeEncodeError`，会让 Hook 进程整个崩掉。`hook_client.py` 因此显式把 stderr reconfigure 成 UTF-8，并用 `sys.stdout.buffer` 直接写 UTF-8 字节。**新增的电脑端脚本必须沿用这个模式**，不要用裸 `print()` 往 stdout/stderr 写非 ASCII 内容。
 - **`request_id` 一一对应**。daemon 为每次审批生成唯一 id 并只接受当前等待中的那个，设备回传时必须原样带回。目的是让迟到按钮（上一次审批超时后才按下）不会误批准下一次请求。

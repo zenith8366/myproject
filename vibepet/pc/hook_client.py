@@ -17,7 +17,7 @@
 
 **两条差别很大的路**（同一个文件被挂在多个事件上，按事件名分派）：
 
-  · PreToolUse ── 要审批：走上面那三步，会阻塞、会输出决策；
+  · PreToolUse / PermissionRequest ── 要审批：走上面那三步，会阻塞、会输出决策；
   · 其它事件 ── 只报状态：告诉设备「AI 正在忙 / 空闲了 / 出错了」，
     发完就走，不等回复，也绝不输出任何东西。
 
@@ -27,24 +27,25 @@
 **一条铁律**：stdout 只准出现审批的那一行 JSON。
 Claude Code 把 stdout 当作决策来解析，混进一句调试日志它就读不懂了，
 审批链路会直接断掉。所以本文件所有「打印」都写去 stderr（给人看），
-只有 emit_decision() 才碰 stdout（给程序看）。
+ 只有 emit_decision() 才碰 stdout（给程序看）。两个审批事件的决策 JSON 结构不同，
+ emit_decision() 会按事件类型输出各自的格式。
 
 ───────────────── 以下为技术细节 ─────────────────
 
 由 Claude Code 的 Hook 唤起，每次事件启动一次进程：
 
     Claude Code ──stdin JSON──> hook_client.py ──本地 Socket──> bridge_daemon.py
-    hook_client.py ──stdout JSON──> Claude Code（只有 PreToolUse 需要）
+    hook_client.py ──stdout JSON──> Claude Code（审批事件需要）
 
 两类职责，行为完全不同：
 
-  1. PreToolUse（审批）—— 阻塞等待物理按钮，向 stdout 输出 allow / deny 决策。
+  1. PreToolUse / PermissionRequest（审批）—— 阻塞等待物理按钮，向 stdout 输出对应格式的决策。
   2. 其余事件（状态）—— 把事件映射成设备状态上报，不阻塞、不输出任何内容。
 
-铁律：stdout 只允许出现 PreToolUse 的那一行 Hook JSON，状态事件一个字都不输出。
+铁律：stdout 只允许出现审批事件的那一行 Hook JSON，状态事件一个字都不输出。
       日志一律走 stderr —— 设计文档 8.1 把「Hook stdout 被日志污染」列为高影响风险。
 
-降级：PreToolUse 任何异常都返回 deny（设计文档 8.3）；状态上报失败则静默放弃 ——
+降级：审批事件任何异常都返回 deny（设计文档 8.3）；状态上报失败则静默放弃 ——
       设备没亮起来，绝不能拖慢 Claude Code。
 
 手动测试：
@@ -354,18 +355,30 @@ def report_state(status, msg):
 
 # 最后一步：把决策交给 Claude Code。
 #
-# 这是**本进程里唯一允许写 stdout 的地方**。格式由 Claude Code 规定：
-# 外层 hookSpecificOutput 里放 hookEventName（固定写 "PreToolUse"）、
-# permissionDecision（allow 还是 deny），再加一句给用户看的原因。
-def emit_decision(allow, reason):
-    """向 stdout 输出唯一一行 Hook JSON —— 这是本进程 stdout 的全部内容。"""
-    result = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow" if allow else "deny",
-            "permissionDecisionReason": reason,
+# 这是**本进程里唯一允许写 stdout 的地方**。两个审批事件使用不同协议：
+# PreToolUse 使用 permissionDecision / permissionDecisionReason；
+# PermissionRequest 使用 decision.behavior / message。
+def emit_decision(allow, reason, event="PreToolUse"):
+    """按 Hook 事件格式向 stdout 输出唯一一行决策 JSON。"""
+    behavior = "allow" if allow else "deny"
+    if event == "PermissionRequest":
+        decision = {"behavior": behavior}
+        if not allow:
+            decision["message"] = reason
+        result = {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": decision,
+            }
         }
-    }
+    else:
+        result = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": behavior,
+                "permissionDecisionReason": reason,
+            }
+        }
     # 又是编码问题：不直接 print，而是拿到底层字节流、自己按 UTF-8 写。
     # 这样无论系统默认编码是什么，发出去的一定是 UTF-8 字节。
     line = json.dumps(result, ensure_ascii=False) + "\n"
@@ -382,10 +395,10 @@ def emit_decision(allow, reason):
 # 这个函数的核心是「再糟也要给个答复」：不管中途发生什么，最后都一定会调用
 # 一次 emit_decision()。因为对 Claude Code 来说，「不说话」等于放行，而我们
 # 宁可错杀不可放过 —— 所以下面每个 except 分支的结局都是 emit_decision(False)。
-def handle_pre_tool_use(hook_input):
-    """审批路径：阻塞等按钮，输出决策。"""
+def handle_approval_event(event, hook_input):
+    """审批路径：阻塞等按钮，并按触发事件输出决策。"""
     tool_name = hook_input.get("tool_name", "")
-    debug(f"收到审批请求: tool={tool_name}")
+    debug(f"收到审批请求: event={event} tool={tool_name}")
 
     try:
         action = request_decision(hook_input)
@@ -394,27 +407,27 @@ def handle_pre_tool_use(hook_input):
         # OSError 的子类（CLAUDE.md 声明支持 ≥3.9）。若只写 TimeoutError，3.9 的
         # 超时会落到下面的 OSError 分支，日志被打成一文不对题的「通信失败」。
         log(f"等待 daemon 决策超时（{DECISION_TIMEOUT:g} s）")
-        emit_decision(False, "VibePet: approval timed out")
+        emit_decision(False, "VibePet: approval timed out", event)
         return 0
     except OSError as exc:
         # 连不上 daemon —— 最常见的情况是「忘了启动 daemon」。
         log(f"daemon 通信失败（{DAEMON_HOST}:{DAEMON_PORT}）: {exc}")
-        emit_decision(False, "VibePet daemon unreachable")
+        emit_decision(False, "VibePet daemon unreachable", event)
         return 0
     except Exception as exc:
         # 其它意料之外的错误。照样要给答复，不能沉默。
         log(f"未预期错误: {exc!r}")
-        emit_decision(False, "VibePet: internal error")
+        emit_decision(False, "VibePet: internal error", event)
         return 0
 
     # 走到这里说明顺利拿到决策了，把结果告诉 Claude Code。
     # （注意：只有这里才可能输出 allow —— 上面所有失败分支一律是 deny。）
     if action == "approve":
-        log(f"审批通过: {tool_name}")
-        emit_decision(True, "Approved by VibePet")
+        log(f"审批通过: event={event} tool={tool_name}")
+        emit_decision(True, "Approved by VibePet", event)
     else:
-        log(f"审批拒绝: {tool_name}")
-        emit_decision(False, "Denied by VibePet")
+        log(f"审批拒绝: event={event} tool={tool_name}")
+        emit_decision(False, "Denied by VibePet", event)
     return 0
 
 
@@ -459,8 +472,8 @@ def main():
         # 兼容手动测试与不带事件名的输入：有 tool_name 就按审批处理
         event = "PreToolUse" if hook_input.get("tool_name") else ""
 
-    if event == "PreToolUse":
-        return handle_pre_tool_use(hook_input)
+    if event in ("PreToolUse", "PermissionRequest"):
+        return handle_approval_event(event, hook_input)
 
     return handle_status_event(event, hook_input)
 

@@ -254,6 +254,7 @@ pip install pyserial
 {
   "hooks": {
     "PreToolUse":       [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
+    "PermissionRequest":[{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
     "PostToolUse":      [{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
     "Stop":             [{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
@@ -267,6 +268,10 @@ Windows 路径建议用正斜杠（`E:/myproject/vibepet/pc/hook_client.py`）�
 
 `"matcher": "Bash"` 决定哪些工具需要物理审批。想改成所有工具都审批就用 `"*"`，
 想只审批特定命令可以在 `"Bash(...)"` 里写匹配规则。
+
+**两条审批链**：`PreToolUse` 管 Bash 命令；`PermissionRequest`（没有 matcher = 所有工具）
+管「其他会弹权限窗的操作」——比如修改工作区外的文件。两者都会把审批送到设备上，
+你按按钮的效果完全一样。
 
 > **⚠️ 挂上 Hook 之后，一定要先启动 daemon 再使用 Claude Code。**
 > daemon 不在时，VibePet 会按安全策略拒绝所有匹配的工具调用——这是有意设计的
@@ -302,14 +307,14 @@ python pc/bridge_daemon.py --serial-port COM7
 
 ### 审批
 
-当 AI 要执行需要批准的操作时：
+当 AI 要做需要你批准的事时——运行命令、修改工作区外的文件等，审批都会出现在设备上：
 
-1. 设备**响一声**，屏幕变成黄色的 `APPROVE?`，下面显示要执行的命令；
-2. 按**批准按钮** → 屏幕立刻变成「已批准」，AI 继续执行；
-3. 按**拒绝按钮** → 屏幕立刻变成「已拒绝」，AI 不会执行这条命令；
+1. 设备**响一声**，屏幕变成黄色的 `APPROVE?`，下面显示命令或操作摘要；
+2. 按**批准按钮** → 屏幕立刻变成「已批准」，AI 继续做；
+3. 按**拒绝按钮** → 屏幕立刻变成「已拒绝」，AI 不会做这件事；
 4. **120 秒**内没有任何操作 → 自动按「拒绝」处理（可以改，见下文）。
 
-同样的命令会在终端里显示为已批准 / 已拒绝。
+同样的操作会在终端里显示为已批准 / 已拒绝。
 
 ### 停止
 
@@ -323,6 +328,7 @@ python pc/bridge_daemon.py --serial-port COM7
 
 VibePet 的降级策略是「拿不准就拒绝」，daemon 缺席时它无法拿到你的决定，只能拒绝。
 开一个窗口跑 `python pc/bridge_daemon.py` 即可。
+（配置里挂了 `PermissionRequest` 时，非命令类操作——比如改工作区外的文件——同样会被拒绝。）
 
 如果不是这个原因，看 daemon 窗口的错误信息——它会把失败原因写在 stderr 上。
 

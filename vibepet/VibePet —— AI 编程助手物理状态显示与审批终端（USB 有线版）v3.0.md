@@ -94,7 +94,7 @@ Claude Code、Codex CLI 等 AI 编程助手正快速进入开发者工作流。�
 ```mermaid
 graph TB
     subgraph 电脑端
-        A[Claude Code] -->|PreToolUse Hook| B[hook_client.py]
+        A[Claude Code] -->|PreToolUse / PermissionRequest Hook| B[hook_client.py]
         B -->|本地 Socket| C[bridge_daemon.py]
         C -->|USB 串口<br/>pyserial| D[COM 口 / 115200]
         D -->|按钮 JSON| C
@@ -117,7 +117,7 @@ graph TB
     style F fill:#f3e5f5
 ```
 
-**工作流**：Claude Code 触发 `PreToolUse` Hook → 调用 `hook_client.py` → 客户端通过本地 Socket 向常驻 `bridge_daemon.py` 发送审批请求 → daemon 通过 USB 串口向 UNO 发送状态和 `request_id` → 屏幕显示审批卡 + 蜂鸣器提示 → 用户按按钮 → UNO 通过串口回传带 `request_id` 的按钮 JSON → daemon 校验 `request_id` 后，将决策返回给 `hook_client.py` → 客户端输出 `allow` / `deny` JSON 给 Claude Code。
+**工作流**：Claude Code 触发 `PreToolUse`（Bash 命令）或 `PermissionRequest`（其他需要权限的操作，2026-10-01 新增）Hook → 调用 `hook_client.py` → 客户端通过本地 Socket 向常驻 `bridge_daemon.py` 发送审批请求 → daemon 通过 USB 串口向 UNO 发送状态和 `request_id` → 屏幕显示审批卡 + 蜂鸣器提示 → 用户按按钮 → UNO 通过串口回传带 `request_id` 的按钮 JSON → daemon 校验 `request_id` 后，将决策返回给 `hook_client.py` → 客户端按事件各自的格式输出决策 JSON 给 Claude Code。
 
 ### 3.2 软件架构框图
 
@@ -579,6 +579,16 @@ daemon 每秒发一次心跳，既是给设备的保活信号，也是 daemon �
 - `error`：红色叉号，静态显示；显示错误信息。
 - `heartbeat_lost`：橙色背景，黑色 “LOST” 大字。
 
+**（7）非 Bash 工具审批：PermissionRequest 事件（2026-10-01 新增）**
+
+`PreToolUse` 只覆盖 Bash（matcher=`Bash`）。Claude Code 里其他「需要用户批准」的操作（修改工作区外文件等）会先弹权限窗，用 `PermissionRequest` 事件把它们也接到设备上：
+
+- **daemon 与固件无需改动**：该事件的 `tool_name` / `tool_input` 字段与 `PreToolUse` 同构，复用同一套单槽审批（F9）与摘要逻辑（`summarize()` 按 command > file_path > path > pattern > url > query 取值）。
+- **电脑端出口协议不同**（同一个 `hook_client.py`，按事件分派）：`PreToolUse` → `hookSpecificOutput.permissionDecision`；`PermissionRequest` → `hookSpecificOutput.decision.behavior`（deny 时附 `message`）。两套格式不能串。
+- **降级策略与 `PreToolUse` 完全一致**（拿不准就拒绝）：daemon 不可达 / 超时 / 解析失败 → `deny`。注意该事件的 API 特性（依据官方文档与 2026-10-01 实测）：① exit code 2 对它不生效，拒绝必须走 JSON；② hook 无输出 = 无决策 = 退回原生权限弹窗（fail-open 到人工提示）—— 因此「降级为 deny」是本项目主动选择的更严格策略，而非该事件的默认行为。
+- **与 Clawd on Desk 并存**：用户级还有一条第三方 `PermissionRequest` HTTP hook，两者并行执行、结果合并（最严格者胜，deny 优先）。2026-10-01 实测无拖慢，详情见 `.claude/README.md`。
+- **已知待办**：`AskUserQuestion` / `ExitPlanMode` 这类「需要交互」的工具也会被本事件接住，但它们即使被 allow 也仍需走原生交互 —— 行为待真机联调确认，可能需要豁免。
+
 ### 5.5 核心代码片段
 
 > ⚠️ **本节是设计节选，用于说明算法骨架，不是逐行可编译的完整实现。** 完整且经过编译验证的
@@ -953,7 +963,7 @@ UNO 端采用**单任务协作式调度，全程不占用任何中断**（`tone(
 
 ### 10.2 技术文档
 
-- **Claude Code Hooks 官方文档**：`PreToolUse` 返回 `hookSpecificOutput.permissionDecision`，取值 `allow` / `deny` / `ask` / `defer`。
+- **Claude Code Hooks 官方文档**：`PreToolUse` 返回 `hookSpecificOutput.permissionDecision`，取值 `allow` / `deny` / `ask` / `defer`；`PermissionRequest` 返回 `hookSpecificOutput.decision.behavior`（`allow` / `deny`，deny 时附 `message`），且 exit code 2 对该事件不生效。
 - **pyserial 文档**：pyserial.readthedocs.io（`Serial` / `SerialException` / `list_ports`）
 - **Adafruit GFX 文档**：learn.adafruit.com/adafruit-gfx-graphics-library
 - **Adafruit ST7735 库**：github.com/adafruit/Adafruit-ST7735-Library
