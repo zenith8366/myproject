@@ -17,7 +17,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - 根目录 `README.md` 是招新题目与要求的**唯一标准文档：只读，不允许修改**；`example/README.md` 为示例说明，同样只读。修订其它任何文档时必须与 README 保持一致。
 - 参与者的工作文档都在 `学习知识/` 目录：《七天学习计划.md》（七天执行手册）、《函数清单.md》（自定义函数总表）、《项目结构图.md》（文件地图与调用关系图），以及《阶段二.md》~《阶段六.md》（各阶段基础知识讲解：含 STM32/FreeRTOS/计算器基础原理与拓展知识，写作体例为"专业说法 + 大白话解释"，内容已按本工程实际接口核对过）；可随进度维护。
-- 本副本的参与路线（已选定）：保留示例的 FreeRTOS 五任务架构，用 `example/User/app.c` 替换 `libcalculator_app.a`，先完成任务 2/3/4、冲刺任务 5；执行细节以《七天学习计划.md》为准。
+- 本副本的参与路线（已选定）：保留示例的 FreeRTOS 五任务架构，按 README 规则做**同名替换**（用户的明确要求，不要单文件自定义架构）——`example/User/calculator_app.c`↔libcalculator_app.a、`User/touch_filter.c`↔libtouch_filter.a、`User/calculator_engine.c`↔libcalculator_engine.a（liblcd1602/libtp229 继续用库）；先完成任务 2/3/4、冲刺任务 5；执行细节以《七天学习计划.md》为准。
+- README 最新「## 提交」章（2026-10-04 更新）要求：提交 = ①演示视频（1~3 分钟）②完整可编译工程 + 工程自己的 README.md ③`REPORT.md`。**`REPORT.md` 必须由用户本人手写，严禁 AI 代写**（README 原文：AI 生成内容"视同无效提交并取消资格"）；其余开发与调试过程 README 鼓励 AI 辅助。提交渠道：fork 仓库 QQ 发地址 / 压缩包 QQ 私发（≤100MB，命名 `Comsen招新-硬件组-[年级]-[姓名]`）。
 
 ## 构建
 
