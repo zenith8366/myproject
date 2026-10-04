@@ -16,12 +16,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 文档与标准
 
 - 根目录 `README.md` 是招新题目与要求的**唯一标准文档：只读，不允许修改**；`example/README.md` 为示例说明，同样只读。修订其它任何文档时必须与 README 保持一致。
-- 《七天学习计划.md》（七天执行手册）与《函数清单.md》（自定义函数总表）是参与者的工作文档，可随进度维护；两者均已随仓库提交。
+- 《七天学习计划.md》（七天执行手册）、《函数清单.md》（自定义函数总表）与《项目结构图.md》（文件地图与调用关系图）是参与者的工作文档，可随进度维护。
 - 本副本的参与路线（已选定）：保留示例的 FreeRTOS 五任务架构，用 `example/User/app.c` 替换 `libcalculator_app.a`，先完成任务 2/3/4、冲刺任务 5；执行细节以《七天学习计划.md》为准。
 
 ## 构建
 
-**上游 README 描述的 `./build.sh` + `toolchain/env.sh` 流程在本副本中不可用**——`setup.sh` 和 `toolchain/` 目录并不存在（那是 Linux/WSL 发布包的一部分）。在 Windows 上直接走 CMake + Ninja（已实测可用）：
+**上游 README 描述的 `./build.sh` + `toolchain/env.sh` 流程在本副本中不可用**——`setup.sh`、`toolchain/` 目录不存在，`example/build.sh` 亦已移除（均属 Linux/WSL 发布包的一部分）。在 Windows 上直接走 CMake + Ninja（已实测可用）：
 
 ```bash
 # cmake/ninja 不在系统 PATH，用 STM32CubeCLT 的 bundle；arm-none-eabi-gcc 已在 PATH 中
