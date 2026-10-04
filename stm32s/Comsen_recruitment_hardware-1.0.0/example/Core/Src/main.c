@@ -27,7 +27,8 @@
  * CubeMX still owns the optional USB configuration used by the separate
  * self-test image. Keep calculator regeneration from starting USB.
  */
-#define MX_USB_DEVICE_Init() ((void)0)
+/* #define MX_USB_DEVICE_Init() ((void)0) */
+#include "usb_device.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -169,6 +170,7 @@ int main(void)
   {
     Error_Handler();
   }
+  MX_USB_DEVICE_Init(); 
 
   /* USER CODE END 2 */
 

@@ -44,10 +44,12 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/User/calculator_app.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/User
     # Add user defined include paths
 )
 
@@ -65,7 +67,7 @@ target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
 # Add linked libraries
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
-    "${CMAKE_CURRENT_SOURCE_DIR}/lib/libcalculator_app.a"
+#   "${CMAKE_CURRENT_SOURCE_DIR}/lib/libcalculator_app.a"
     "${CMAKE_CURRENT_SOURCE_DIR}/lib/libcalculator_engine.a"
     "${CMAKE_CURRENT_SOURCE_DIR}/lib/liblcd1602.a"
     "${CMAKE_CURRENT_SOURCE_DIR}/lib/libttp229.a"
