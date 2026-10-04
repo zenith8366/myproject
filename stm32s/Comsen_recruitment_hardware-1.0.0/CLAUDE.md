@@ -11,7 +11,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 参赛者的任务是逐模块替换：自己实现某个模块后，从 `example/CMakeLists.txt` 的链接列表中删掉对应 `.a`，加入自己的 `.c`。**不要同时保留同名实现与原库**。
 - 仓库文档与代码注释均使用中文。
 
-本目录尚未被 git 跟踪；git 仓库根是 `E:/myproject`（个人嵌入式项目合集）。在此处的 commit 会落到那个合集仓库里，操作前先确认范围。
+本目录已被 git 跟踪（最新状态以 `git status` 为准），git 仓库根是 `E:/myproject`（个人嵌入式项目合集）。在此处的 commit 会落到那个合集仓库里，操作前先确认范围。
+
+### 文档与标准
+
+- 根目录 `README.md` 是招新题目与要求的**唯一标准文档：只读，不允许修改**；`example/README.md` 为示例说明，同样只读。修订其它任何文档时必须与 README 保持一致。
+- 《七天学习计划.md》（七天执行手册）与《函数清单.md》（自定义函数总表）是参与者的工作文档，可随进度维护；两者均已随仓库提交。
+- 本副本的参与路线（已选定）：保留示例的 FreeRTOS 五任务架构，用 `example/User/app.c` 替换 `libcalculator_app.a`，先完成任务 2/3/4、冲刺任务 5；执行细节以《七天学习计划.md》为准。
 
 ## 构建
 
@@ -27,7 +33,7 @@ cmake --build example/build/Debug
 
 - 编译器：`D:\Arm\GNU Toolchain mingw-w64-i686-arm-none-eabi\bin\arm-none-eabi-gcc.exe`（Arm GNU Toolchain 15.3.1，已在 PATH）。`lib/*.a` 由 Arm GNU Toolchain 15.2 构建，ABI 兼容。
 - 产物：`example/build/<Config>/software.elf`、`.hex`、`.bin`、`.map`（hex/bin 由 `CMakeLists.txt` 的 POST_BUILD 生成）。
-- 实测占用：Debug FLASH 44240 B (67.5%) / RAM 13184 B (64.4%)；Release FLASH 39852 B (60.8%)。**Flash 只有 64 KiB，余量不多。**
+- 实测占用（`arm-none-eabi-size`，2026-10-04）：Debug FLASH 44236 B (67.5%) / RAM 13192 B (64.4%)；Release FLASH 39848 B (60.8%) / RAM 13184 B (64.4%)。**Flash 只有 64 KiB，余量不多。**
 - 用 CubeMX 打开 `example/software.ioc` 可查看或重新生成配置。
 
 ## 无自动化测试
