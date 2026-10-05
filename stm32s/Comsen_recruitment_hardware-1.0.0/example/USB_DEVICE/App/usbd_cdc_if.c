@@ -96,6 +96,12 @@ uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 /* USER CODE BEGIN PRIVATE_VARIABLES */
 static volatile uint8_t export_requested;
 static uint8_t export_match_index;
+/* ===== D3：USB 接收环形缓冲（中断写 head，任务写 tail） ===== */
+#define CDC_RX_RING_SIZE 128U
+static volatile uint8_t  s_rx_ring[CDC_RX_RING_SIZE];
+static volatile uint16_t s_rx_head;      /* 只由 USB 中断修改 */
+static volatile uint16_t s_rx_tail;      /* 只由 CDC_RxTake（任务）修改 */
+static volatile uint8_t  s_rx_overflow;  /* 缓冲满过就会置 1 */
 
 /* USER CODE END PRIVATE_VARIABLES */
 
@@ -284,7 +290,22 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
       export_match_index = (character == (uint8_t)'E') ? 1U : 0U;
     }
   }
-
+  /* ===== D3：把收到的字节塞进环形缓冲 =====
+   * 【铁律 3】这里在 USB 中断上下文：
+   *   - 不能 osDelay / HAL_Delay / 刷屏 / 打印
+   *   - 不调用任何 FreeRTOS API（我们的做法就是"只拷贝"）
+   * 你返回后，下面两行生成代码会自动重新武装端点，继续收下一包。 */
+  for (uint32_t i = 0; i < *Len; i++)
+  {
+    uint16_t next = (uint16_t)((s_rx_head + 1U) % CDC_RX_RING_SIZE);
+    if (next == s_rx_tail)
+    {
+      s_rx_overflow = 1U;   /* 满了：丢掉新字节并做记号 */
+      break;
+    }
+    s_rx_ring[s_rx_head] = Buf[i];
+    s_rx_head = next;
+  }
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
   return (USBD_OK);
@@ -334,6 +355,32 @@ uint8_t CDC_TakeExportRequest_FS(void)
   }
 
   return requested;
+}
+
+/* ===== D3：供任务侧取走数据（短临界区，照抄 TakeExport 的姿势） ===== */
+uint16_t CDC_RxTake(uint8_t *dst, uint16_t max_len)
+{
+  uint32_t primask = __get_PRIMASK();
+  uint16_t n = 0U;
+
+  __disable_irq();
+  while ((s_rx_tail != s_rx_head) && (n < max_len))
+  {
+    dst[n++] = s_rx_ring[s_rx_tail];
+    s_rx_tail = (uint16_t)((s_rx_tail + 1U) % CDC_RX_RING_SIZE);
+  }
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+  return n;
+}
+
+uint8_t CDC_RxOverflow(void)
+{
+  uint8_t v = s_rx_overflow;
+  s_rx_overflow = 0U;
+  return v;
 }
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */

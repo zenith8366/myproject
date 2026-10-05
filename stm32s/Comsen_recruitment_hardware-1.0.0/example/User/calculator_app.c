@@ -18,6 +18,11 @@
 #include "main.h"             /* HAL_GPIO_TogglePin / GPIOC / GPIO_PIN_13 */
 #include "cmsis_os.h"         /* osDelay、栈高水位查询等（FreeRTOS 的封装） */
 #include "lcd1602.h"          /* 显示库接口 */
+#include "usb_device.h"       /* USBD_STATE_CONFIGURED 等 */
+#include "usbd_cdc_if.h"      /* CDC_Transmit_FS / CDC_RxTake */
+#include <string.h>           /* 不用也行，可删 */
+
+extern USBD_HandleTypeDef hUsbDeviceFS;   /* 定义在 usb_device.c */
 
 /* ------------------------------- 可调参数 -------------------------------- */
 #define APP_KEY_PERIOD_MS    10U    /* 触摸扫描周期：库约定 10ms 一次 */
@@ -107,6 +112,94 @@ static void app_display(const char *l1, const char *l2)
   app_unlock(pm);
 }
 
+/* ------------------------------- D3：串口收发 ------------------------------ */
+
+/* 显示窗口：最近收到的 13 个字符（滚动效果），屏幕第一行 = "PC:" + 这 13 个 */
+static char    s_pc_tail[13];
+static uint8_t s_pc_any;         /* 是否收到过任何字符 */
+
+/* 向电脑发送（回显用）。规矩背下来：
+ *   1) 只有 controllerTask 调用它（单写者，下面静态缓冲不用抢锁）；
+ *   2) USB 没枚举好就直接放弃；
+ *   3) CDC 发送是"借用指针"的：数据要一直有效到发完，
+ *      所以先拷进 s_tx_buf 再发。 */
+static uint8_t s_tx_buf[128];
+
+static void app_usb_send(const uint8_t *data, uint16_t len)
+{
+  USBD_CDC_HandleTypeDef *hcdc;
+
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED)
+  {
+    return;                              /* 电脑还没把这个设备准备就绪，别发 */
+  }
+  if (len > (uint16_t)sizeof(s_tx_buf))
+  {
+    len = (uint16_t)sizeof(s_tx_buf);
+  }
+
+  hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+
+  /* 等上一次发完（最多 50ms），再把数据拷进发送缓冲 */
+  for (uint8_t t = 0U; (t < 50U) && (hcdc != NULL) && (hcdc->TxState != 0U); t++)
+  {
+    osDelay(1U);
+  }
+  for (uint16_t i = 0U; i < len; i++)
+  {
+    s_tx_buf[i] = data[i];
+  }
+
+  /* 发送；忙就等 1ms 重试（最多 50 次） */
+  for (uint8_t t = 0U; t < 50U; t++)
+  {
+    if (CDC_Transmit_FS(s_tx_buf, len) != USBD_BUSY)
+    {
+      return;
+    }
+    osDelay(1U);
+  }
+  /* 一直忙：通常出现在拔线之后。插回 USB 即恢复正常。 */
+}
+
+/* 每个控制周期调用一次：取走 USB 数据 → 滚进窗口 → 刷屏 */
+static void app_usb_poll(void)
+{
+  uint8_t  buf[64];
+  uint16_t n = CDC_RxTake(buf, (uint16_t)sizeof(buf));
+  char     t[17];
+
+  if (n == 0U)
+  {
+    return;
+  }
+
+  app_usb_send(buf, n);                  /* 回显：电脑端立刻能看到，调试神器 */
+
+  for (uint16_t i = 0U; i < n; i++)
+  {
+    /* 把 buf[i] 滚进 s_pc_tail（滚动窗口）：
+     * 先把 s_pc_tail[0..11] 左移一位，新字符放到 s_pc_tail[12]。
+     * '\r'/'\n'（回车换行）在屏幕上显示成空格（1602 没有换行概念）。 */
+    for (uint8_t k = 0U; k < 12U; k++)
+    {
+      s_pc_tail[k] = s_pc_tail[k + 1U];
+    }
+    s_pc_tail[12] = (buf[i] == '\r' || buf[i] == '\n') ? ' ' : (char)buf[i];
+    s_pc_any = 1U;
+  }
+
+  /* 组装第一行 "PC:" + 13 字符窗口 */
+  t[0] = 'P'; t[1] = 'C'; t[2] = ':';
+  for (uint8_t k = 0U; k < 13U; k++)
+  {
+    t[3U + k] = s_pc_tail[k];
+  }
+  t[16] = '\0';
+
+  app_display(t, (s_pc_any != 0U) ? "PC > LCD" : "send text...");
+}
+
 /* ============================== 6 个契约函数 ============================== */
 
 /* 在调度器启动之前被调用：只能做"初始化和硬件自检"，不能用 osDelay！ */
@@ -131,7 +224,6 @@ void calculator_key_task(void)
 {
   for (;;)
   {
-    HAL_Delay(3000);
     /* TODO(D4)：读键 → 去抖 → 投递事件 */
     osDelay(APP_KEY_PERIOD_MS);
   }
@@ -167,8 +259,8 @@ void calculator_controller_task(void)
 {
   for (;;)
   {
-    /* TODO(D3)：app_usb_poll();
-     * TODO(D4)：按键事件处理 */
+    app_usb_poll();
+    /* TODO(D4)：按键事件处理 */
     osDelay(APP_CTRL_PERIOD_MS);
   }
 }
