@@ -131,6 +131,7 @@ void calculator_key_task(void)
 {
   for (;;)
   {
+    HAL_Delay(3000);
     /* TODO(D4)：读键 → 去抖 → 投递事件 */
     osDelay(APP_KEY_PERIOD_MS);
   }
