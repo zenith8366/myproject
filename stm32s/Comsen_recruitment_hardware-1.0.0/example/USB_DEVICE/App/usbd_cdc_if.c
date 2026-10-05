@@ -267,6 +267,7 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
+  /* ===== 原有的 EXPORT 匹配逻辑（保持不变） ===== */
   static const char command[] = "EXPORT";
 
   for (uint32_t i = 0; i < *Len; ++i)
@@ -290,6 +291,7 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
       export_match_index = (character == (uint8_t)'E') ? 1U : 0U;
     }
   }
+
   /* ===== D3：把收到的字节塞进环形缓冲 =====
    * 【铁律 3】这里在 USB 中断上下文：
    *   - 不能 osDelay / HAL_Delay / 刷屏 / 打印
@@ -306,10 +308,11 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
     s_rx_ring[s_rx_head] = Buf[i];
     s_rx_head = next;
   }
-  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
-  USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-  return (USBD_OK);
   /* USER CODE END 6 */
+
+  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);   /* 官方：设置下次接收缓冲 */
+  USBD_CDC_ReceivePacket(&hUsbDeviceFS);          /* 官方：重新武装端点 */
+  return (USBD_OK);
 }
 
 /**
