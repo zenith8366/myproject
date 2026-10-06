@@ -24,7 +24,8 @@ void touch_filter_init(touch_filter_t *filter)
   filter->wait_all_released = 0U;
 }
 
-/* 每 10ms 调用一次。D4 目标：返回"当前稳定按着的单个键位"，没有则返回 0 */
+/* 每 10ms 调用一次。D5 语义升级：只在"新按下"的瞬间返回那个键位，
+ * 按住不放不会重复触发；必须松手才能触发下一个键。 */
 uint32_t touch_filter_update(touch_filter_t *filter, uint32_t raw_bitmap)
 {
   uint32_t stable = 0U;
@@ -53,11 +54,25 @@ uint32_t touch_filter_update(touch_filter_t *filter, uint32_t raw_bitmap)
   }
   filter->stable_bitmap = stable;
 
-  /* 第 3 步：没有稳定按键 → 返回 0（"无键"）；
-   * 有 → 返回编号最小的那一位（多键同按时以小编号为准，配合试触页的取舍规则）。 */
-  if (stable == 0UL)
+  /* 第 3 步：单键锁定（边沿触发——D5 升级）。
+   * wait_all_released 是个小状态机：
+   *   - 报过一个键后就"锁上"，锁定期间无论读到什么都返回 0；
+   *   - 等所有手指离开（stable 变 0）才重新武装，允许触发下一个键。
+   * 手感 = 真实计算器：按住不放只触发一次，必须松手才能按下一个键。 */
+  if (filter->wait_all_released != 0U)
   {
-    return 0UL;
+    if (stable == 0UL)
+    {
+      filter->wait_all_released = 0U;      /* 手都离开了：重新武装 */
+    }
+    return 0UL;                            /* 锁定期间（含解锁这一刻）不报键 */
   }
-  return (uint32_t)(1UL << __builtin_ctz(stable));
+
+  if (stable != 0UL)
+  {
+    filter->wait_all_released = 1U;        /* 报键前先锁上 */
+    return (uint32_t)(1UL << __builtin_ctz(stable));
+  }
+
+  return 0UL;
 }

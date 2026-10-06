@@ -23,6 +23,7 @@
 #include <string.h>           /* 不用也行，可删 */
 #include "ttp229.h"           /* 物理按键原始读取（继续用库） */
 #include "touch_filter.h"     /* 你的 touch_filter.c 的接口（同名） */
+#include "calculator_engine.h" /* D6：求值器接口（你的 calculator_engine.c 实现） */
 
 extern USBD_HandleTypeDef hUsbDeviceFS;   /* 定义在 usb_device.c */
 
@@ -31,6 +32,7 @@ extern USBD_HandleTypeDef hUsbDeviceFS;   /* 定义在 usb_device.c */
 #define APP_CTRL_PERIOD_MS   10U    /* 控制任务周期 */
 #define APP_LCD_PERIOD_MS   100U    /* 刷新周期：LCD 库内部用 HAL_Delay 逐字节写，别设太小 */
 #define APP_HB_PERIOD_MS    500U    /* 心跳灯：每 500ms 翻转一次 = 每秒闪 1 下 */
+#define APP_SPLASH_MS      1500U    /* 欢迎页停留时长，之后自动切到主界面 */
 
 /* -------------------------------- 共享状态 ------------------------------- */
 /* 【FreeRTOS 学习点】5 个任务共享一份数据，规则只有两条：
@@ -114,8 +116,7 @@ static void app_display(const char *l1, const char *l2)
   app_unlock(pm);
 }
 
-/* ------------------------------- D4：按键事件与试触页 ---------------------- */
-#define APP_KEY_EVENT_RELEASE  0xFEU   /* "松手"事件（只给试触页用） */
+/* ------------------------------- D4：按键事件 ----------------------------- */
 
 static touch_filter_t s_filter;    /* 滤波状态（放全局，不放任务栈上） */
 
@@ -142,25 +143,6 @@ static uint8_t app_key_pop(uint8_t *ev)
   *ev = s_app.key_fifo[s_app.key_tail];
   s_app.key_tail = (uint8_t)((s_app.key_tail + 1U) & 0x0FU);
   return 1U;
-}
-
-/* 试触页：把键号显示到屏幕（D5 换成计算器输入后，这个函数退休） */
-static void app_show_key(uint8_t ev)
-{
-  char t[17];
-
-  if (ev == APP_KEY_EVENT_RELEASE)
-  {
-    app_display("KEY: ---", "touch trial page");
-    return;
-  }
-
-  t[0] = 'K'; t[1] = 'E'; t[2] = 'Y'; t[3] = ':'; t[4] = ' ';
-  t[5] = 'T';
-  t[6] = (char)('0' + (ev / 10U));
-  t[7] = (char)('0' + (ev % 10U));
-  t[8] = '\0';
-  app_display(t, "touch trial page");
 }
 
 /* ------------------------------- D3：串口收发 ------------------------------ */
@@ -251,6 +233,240 @@ static void app_usb_poll(void)
   app_display(t, (s_pc_any != 0U) ? "PC > LCD" : "send text...");
 }
 
+/* ------------------------------- D5：输入组织 ------------------------------ */
+
+/* 物理键 T0..T29 → 输入字符；0xFF = 暂不映射（按下无反应）。
+ * 下标 = D4 试触实测的实物编号；值 = 键位设计表（6 行 × 5 列，2026-10-06 定格）：
+ *
+ *         列1          列2           列3          列4           列5
+ *   行1   T0 SHIFT     T1 BACK       T2 MODE      T3 ↑          T4 OK
+ *   行2   T5 (         T6 )          T7 ←         T8 ↓          T9 →
+ *   行3   T10 7(π)     T11 8(∠)      T12 9(i)     T13 DEL       T14 AC
+ *   行4   T15 4(e)     T16 5(log)    T17 6(ln)    T18 *(x^y)    T19 ÷(√)
+ *   行5   T20 1(sin)   T21 2(cos)    T22 3(tan)   T23 +         T24 -
+ *   行6   T25 0        T26 .         T27 x10^x    T28 FMT(ANS)  T29 EXE
+ *
+ * D5 已启用：数字 / 小数点 / * ÷ + - / 括号 / AC / 退格 / 求值。
+ * 预留未启用（0xFF）：SHIFT、MODE、方向键、OK、x10^x、FMT(ANS)——属任务 5 冲刺
+ * 与自选功能。SHIFT 副功能设计先记在这：7→π、8→∠、9→i、4→e、5→log、6→ln、
+ * *→x^y、÷→√、1→sin、2→cos、3→tan、FMT→ANS，待求值器支持后再接。
+ * DEL（T13）暂与 BACK 同做退格，若要区分语义改这里即可。 */
+#define APP_CH_AC    0x01U   /* AC：全清 */
+#define APP_CH_BACK  0x08U   /* BACK：退格 */
+#define APP_CH_EQ    0x0DU   /* =：求值（EXE 键） */
+
+static const uint8_t s_key_map[30] =
+{
+  /* T0      T1          T2     T3     T4     T5     T6     T7     T8     T9    */
+    0xFFU,  APP_CH_BACK, 0xFFU, 0xFFU, 0xFFU, '(',   ')',   0xFFU, 0xFFU, 0xFFU,
+  /* T10    T11    T12    T13         T14        T15    T16    T17    T18    T19 */
+    '7',   '8',   '9',   APP_CH_BACK, APP_CH_AC, '4',   '5',   '6',   '*',   '/',
+  /* T20    T21    T22    T23    T24    T25    T26    T27    T28    T29 */
+    '1',   '2',   '3',   '+',   '-',   '0',   '.',   0xFFU, 0xFFU, APP_CH_EQ,
+};
+
+static char    s_expr[32];       /* 输入的表达式（C 字符串） */
+static uint8_t s_expr_len;
+static uint8_t s_just_eval;      /* 刚按过 = ：下一次按数字要开新算式 */
+
+static void app_calc_evaluate(void);   /* 前置声明：app_calc_input 的求值分支要调用它 */
+
+/* 显示表达式：超过 16 字符时显示"末尾 15 字符"，最左边放 '>' 提示被截断 */
+static void app_calc_show(void)
+{
+  char    t[17];
+  uint8_t start;
+  uint8_t j = 0U;
+
+  if (s_expr_len == 0U)
+  {
+    app_display("0", "ready");       /* 主界面空闲态 */
+    return;
+  }
+
+  start = (s_expr_len > 16U) ? (uint8_t)(s_expr_len - 15U) : 0U;
+  if (start > 0U)
+  {
+    t[j++] = '>';
+  }
+  for (uint8_t k = start; k < s_expr_len; k++)
+  {
+    t[j++] = s_expr[k];
+  }
+  t[j] = '\0';
+
+  app_display(t, "= to eval");
+}
+
+/* 所有输入（触摸键、以后想加的串口命令）都从这里进 */
+static void app_calc_input(uint8_t c)
+{
+  /* 1) AC 全清 */
+  if (c == APP_CH_AC)
+  {
+    s_expr_len = 0U;
+    s_expr[0] = '\0';
+    s_just_eval = 0U;
+    app_calc_show();
+    return;
+  }
+
+  /* 2) 退格：删掉最后一个字符（空了就不动） */
+  if (c == APP_CH_BACK)
+  {
+    if (s_expr_len > 0U)
+    {
+      s_expr_len--;
+      s_expr[s_expr_len] = '\0';
+    }
+    app_calc_show();
+    return;
+  }
+
+  /* 3) = 求值（D6 实现；现在无反应） */
+  if (c == APP_CH_EQ)
+  {
+    app_calc_evaluate();
+    return;
+  }
+
+  /* 4) 刚求过值（= 后）的状态机：
+   *    按数字/小数点 → 清空、开新算式；
+   *    按运算符     → 保留结果字符串，在它上面继续算；
+   *    两种情况都离开"刚求值"状态——否则后续数字会被误当成新算式清掉。 */
+  if (s_just_eval != 0U)
+  {
+    if (((c >= '0') && (c <= '9')) || (c == '.'))
+    {
+      s_expr_len = 0U;
+      s_expr[0] = '\0';
+    }
+    s_just_eval = 0U;
+  }
+
+  /* 5) 追加字符（给 '\0' 留一个位置） */
+  if (s_expr_len < (uint8_t)(sizeof(s_expr) - 1U))
+  {
+    s_expr[s_expr_len] = (char)c;
+    s_expr_len++;
+    s_expr[s_expr_len] = '\0';
+  }
+
+  /* 6) 刷新显示 */
+  app_calc_show();
+}
+
+/* 把 float 变成短字符串：整数部分 + 两位小数（四舍五入）。
+ * 例：7 → "7.00"；-2.5 → "-2.50"；超范围/NaN → "Error" */
+static void app_format_float(float v, char *out, uint8_t out_size)
+{
+  char     tmp[16];
+  uint8_t  n = 0U;
+  uint8_t  j = 0U;
+  uint8_t  neg = 0U;
+  uint32_t ip;
+  uint32_t fp;
+
+  if (!(v > -1.0e9f && v < 1.0e9f))     /* NaN 和无穷也走这里 */
+  {
+    const char *e = "Error";
+    uint8_t k = 0U;
+    while (e[k] != '\0' && (uint8_t)(k + 1U) < out_size)
+    {
+      out[k] = e[k];
+      k++;
+    }
+    out[k] = '\0';
+    return;
+  }
+
+  if (v < 0.0f)
+  {
+    neg = 1U;
+    v = -v;
+  }
+
+  ip = (uint32_t)v;                                   /* 整数部分 */
+  fp = (uint32_t)(((v - (float)ip) * 100.0f) + 0.5f); /* 小数部分，四舍五入 */
+  if (fp >= 100U)                                     /* 进位：0.999.. → 1.00 */
+  {
+    ip++;
+    fp -= 100U;
+  }
+
+  /* 整数部分倒着生成（% 10 取末位） */
+  do
+  {
+    tmp[n++] = (char)('0' + (ip % 10U));
+    ip /= 10U;
+  } while (ip > 0U && n < 12U);
+
+  if (neg && (j + 1U) < out_size)
+  {
+    out[j++] = '-';
+  }
+  while (n > 0U && (j + 1U) < out_size)
+  {
+    out[j++] = tmp[--n];               /* 反转回来 */
+  }
+  if ((j + 1U) < out_size) { out[j++] = '.'; }
+  if ((j + 1U) < out_size) { out[j++] = (char)('0' + (fp / 10U)); }
+  if ((j + 1U) < out_size) { out[j++] = (char)('0' + (fp % 10U)); }
+  out[j] = '\0';
+}
+
+/* '='：求值 → 显示 → 结果回填（供继续运算），模仿卡西欧的连续计算手感。
+ * 【为什么在控制任务里直接算】s_expr 只有控制任务一个写者，
+ * 不会出现两个任务同时改一个缓冲的竞态；求值器很小，栈够用。 */
+static void app_calc_evaluate(void)
+{
+  calc_complex_t res;
+  calc_status_t  st;
+  char    r[20];
+  char    line1[17];
+  uint8_t rlen;
+
+  if (s_expr_len == 0U)
+  {
+    return;                              /* 空表达式：当没按过 */
+  }
+
+  st = calculator_evaluate(s_expr, CALC_ANGLE_DEG, 0U, (calc_complex_t){0}, &res);
+
+  if (st == CALC_OK)
+  {
+    app_format_float(res.real, r, (uint8_t)sizeof(r));
+    rlen = app_len16(r);
+
+    /* 显示行："=" + 结果，例如 "=7.00" */
+    line1[0] = '=';
+    for (uint8_t i = 0U; i < rlen; i++)
+    {
+      line1[1U + i] = r[i];
+    }
+    line1[1U + rlen] = '\0';
+
+    /* 回填：s_expr 变成结果字符串（含结尾 '\0'），按运算符可接着算；
+     * just_eval=1 → 下一次按数字则开新算式（卡西欧式行为） */
+    for (uint8_t i = 0U; i <= rlen; i++)
+    {
+      s_expr[i] = r[i];
+    }
+    s_expr_len = rlen;
+    s_just_eval = 1U;
+
+    app_display(line1, "C=back  AC=clear");
+  }
+  else if (st == CALC_DIV_ZERO)
+  {
+    app_display(s_expr, "! div by 0");
+  }
+  else
+  {
+    app_display(s_expr, "! syntax");
+  }
+}
+
 /* ============================== 6 个契约函数 ============================== */
 
 /* 在调度器启动之前被调用：只能做"初始化和硬件自检"，不能用 osDelay！ */
@@ -271,20 +487,17 @@ void calculator_heartbeat_task(void)
   }
 }
 
-/* 按键任务：D4 再填内容，现在先空转 */
+/* 按键任务：每 10ms 读触摸 → 滤波 → 投递"新按下"事件 */
 void calculator_key_task(void)
 {
-  uint32_t prev = 0U;
-
   for (;;)
   {
     uint32_t raw = ttp229_read_physical();                 /* 库：读 30 位位图 */
     uint32_t key = touch_filter_update(&s_filter, raw);    /* 你的：滤波 */
 
-    if (key != prev)
+    if (key != 0U)                                /* 只在"新按下"瞬间有值 */
     {
-      app_key_push((key == 0U) ? APP_KEY_EVENT_RELEASE : (uint8_t)__builtin_ctz(key));
-      prev = key;
+      app_key_push((uint8_t)__builtin_ctz(key));
     }
     osDelay(APP_KEY_PERIOD_MS);
   }
@@ -318,16 +531,31 @@ void calculator_lcd_task(void)
 /* 控制任务：D3/D4 在这里汇聚"串口数据 + 按键事件" */
 void calculator_controller_task(void)
 {
-  uint8_t ev;
+  uint8_t  ev;
+  uint32_t t0 = osKernelGetTickCount();   /* 开机时刻 ≈ 本任务第一次运行 */
+  uint8_t  intro_done = 0U;
 
   for (;;)
   {
     app_usb_poll();                 /* D3 */
 
-    while (app_key_pop(&ev))        /* D4：按键事件 */
+    while (app_key_pop(&ev))        /* D4/D5：按键事件 → 输入 */
     {
-      app_show_key(ev);
+      uint8_t ch = s_key_map[ev];
+      if (ch != 0xFFU)              /* 0xFF = 该键未映射，忽略 */
+      {
+        app_calc_input(ch);
+      }
     }
+
+    /* 欢迎页展示 APP_SPLASH_MS 后自动进入主界面（"0" + "ready"）。
+     * 欢迎期间若有按键，app_calc_input 已刷过屏；这里补刷一次只是重显当前状态，无害。 */
+    if ((intro_done == 0U) && ((osKernelGetTickCount() - t0) >= APP_SPLASH_MS))
+    {
+      intro_done = 1U;
+      app_calc_show();
+    }
+
     osDelay(APP_CTRL_PERIOD_MS);
   }
 }
