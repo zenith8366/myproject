@@ -250,13 +250,14 @@ static void app_usb_poll(void)
  * MODE = 设置菜单（COMP/CMPLX、DEG/RAD 全局设置）；x10^x(T27) = 科学计数记号的 'E'；
  * SHIFT = 修饰状态键：按后下一键出副功能（见 app_shift_alt）——7→π、4→e、5→log(、
  * 6→ln(、1→sin(、2→cos(、3→tan(、÷→sqrt(；8→∠、9→i、*→x^y 属复数/幂运算，暂未支持。
- * 预留未启用（0xFF）：方向键、OK、FMT(ANS)。 */
+ * FMT(T28) = 显示精度切换（2 / 4 / 6 位小数）；预留未启用（0xFF）：方向键、OK。 */
 #define APP_CH_AC    0x01U   /* AC：全清 */
 #define APP_CH_UNDO  0x08U   /* BACK：撤销（式子粒度回滚，深度 8） */
 #define APP_CH_DEL   0x7FU   /* DEL：删除最后一个字符 */
 #define APP_CH_EQ    0x0DU   /* =：求值（EXE 键） */
 #define APP_CH_SHIFT 0x02U   /* SHIFT：修饰状态键（副功能见 app_shift_alt） */
 #define APP_CH_MODE  0x04U   /* MODE：设置菜单（COMP/CMPLX、DEG/RAD） */
+#define APP_CH_FMT   0x06U   /* FMT：循环切换显示精度（2 / 4 / 6 位小数） */
 
 static const uint8_t s_key_map[30] =
 {
@@ -265,7 +266,7 @@ static const uint8_t s_key_map[30] =
   /* T10    T11    T12    T13        T14        T15    T16    T17    T18    T19 */
     '7',   '8',   '9',   APP_CH_DEL, APP_CH_AC, '4',   '5',   '6',   '*',   '/',
   /* T20    T21    T22    T23    T24    T25    T26    T27    T28    T29 */
-    '1',   '2',   '3',   '+',   '-',   '0',   '.',   'E',   0xFFU, APP_CH_EQ,
+    '1',   '2',   '3',   '+',   '-',   '0',   '.',   'E',   APP_CH_FMT, APP_CH_EQ,
 };
 
 static char    s_expr[32];       /* 输入的表达式（C 字符串） */
@@ -275,6 +276,7 @@ static uint8_t s_shift_active;   /* SHIFT 修饰态：下一次按键消费掉�
 static uint8_t s_cmplx_mode;     /* 计算模式：0=COMP，1=CMPLX（MODE 菜单里切换） */
 static uint8_t s_angle_rad;      /* 角度制：0=DEG（角度），1=RAD（弧度）；全局设置 */
 static uint8_t s_mode_menu;      /* 1 = 正在 MODE 设置菜单里 */
+static uint8_t s_frac_digits = 2U;  /* FMT：结果显示的小数位数（2 / 4 / 6） */
 
 /* 撤销栈（BACK 键）：以"式子"为粒度——只在这些时刻记快照：
  *   ① 从"空 / 刚求值(结果)"状态开始输入第一个字符之前（记下式子起点的状态）；
@@ -347,7 +349,9 @@ static const char *app_shift_alt(uint8_t c)
     case '2': return "cos(";
     case '3': return "tan(";
     case '/': return "sqrt(";
-    default:  return NULL;      /* 8→∠、9→i、*→x^y 属复数/幂运算，暂未支持 */
+    case '9': return (s_cmplx_mode != 0U) ? "i" : NULL;   /* 虚数单位：仅 COMPLX 模式 */
+    case '8': return (s_cmplx_mode != 0U) ? "@" : NULL;   /* 极坐标 a@θ：仅 COMPLX 模式 */
+    default:  return NULL;      /* *→x^y 幂运算暂未支持 */
   }
 }
 
@@ -530,6 +534,19 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
+  /* 3.5) FMT：循环切换显示精度 2 → 4 → 6 → 2，第二行提示当前设置 */
+  if (c == APP_CH_FMT)
+  {
+    char t[8];
+
+    s_frac_digits = (s_frac_digits == 2U) ? 4U : ((s_frac_digits == 4U) ? 6U : 2U);
+    t[0] = 'F'; t[1] = 'I'; t[2] = 'X'; t[3] = ':'; t[4] = ' ';
+    t[5] = (char)('0' + s_frac_digits);
+    t[6] = '\0';
+    app_calc_show_hint(t);
+    return;
+  }
+
   /* 4) AC 全清（清之前记撤销点，BACK 可恢复到清空前） */
   if (c == APP_CH_AC)
   {
@@ -581,9 +598,9 @@ static void app_calc_input(uint8_t c)
   app_calc_show();
 }
 
-/* 把 float 变成短字符串：整数部分 + 两位小数（四舍五入）。
- * 例：7 → "7.00"；-2.5 → "-2.50"；超范围/NaN → "Error" */
-static void app_format_float(float v, char *out, uint8_t out_size)
+/* 把 float 变成短字符串：整数部分 + frac 位小数（四舍五入；frac ∈ {2,4,6}）。
+ * 例（frac=2）：7 → "7.00"；-2.5 → "-2.50"；超范围/NaN → "Error" */
+static void app_format_float(float v, char *out, uint8_t out_size, uint8_t frac)
 {
   char     tmp[16];
   uint8_t  n = 0U;
@@ -591,6 +608,20 @@ static void app_format_float(float v, char *out, uint8_t out_size)
   uint8_t  neg = 0U;
   uint32_t ip;
   uint32_t fp;
+  uint32_t scale = 1U;
+  uint32_t div;
+
+  for (uint8_t i = 0U; i < frac; i++)
+  {
+    scale *= 10U;                          /* 10^frac */
+  }
+
+  /* 显示分辨率以下的浮点残渣归零（如 sin(30)+cos(60)-1 的 1e-8 噪声），
+   * 免得上屏出现 "-0.00" 这类噪点 */
+  if ((v > -(0.5f / (float)scale)) && (v < (0.5f / (float)scale)))
+  {
+    v = 0.0f;
+  }
 
   if (!(v > -1.0e9f && v < 1.0e9f))     /* NaN 和无穷也走这里 */
   {
@@ -611,12 +642,12 @@ static void app_format_float(float v, char *out, uint8_t out_size)
     v = -v;
   }
 
-  ip = (uint32_t)v;                                   /* 整数部分 */
-  fp = (uint32_t)(((v - (float)ip) * 100.0f) + 0.5f); /* 小数部分，四舍五入 */
-  if (fp >= 100U)                                     /* 进位：0.999.. → 1.00 */
+  ip = (uint32_t)v;                                      /* 整数部分 */
+  fp = (uint32_t)(((v - (float)ip) * (float)scale) + 0.5f); /* 小数部分，四舍五入 */
+  if (fp >= scale)                                       /* 进位：0.999.. → 1.00 */
   {
     ip++;
-    fp -= 100U;
+    fp -= scale;
   }
 
   /* 整数部分倒着生成（% 10 取末位） */
@@ -635,9 +666,65 @@ static void app_format_float(float v, char *out, uint8_t out_size)
     out[j++] = tmp[--n];               /* 反转回来 */
   }
   if ((j + 1U) < out_size) { out[j++] = '.'; }
-  if ((j + 1U) < out_size) { out[j++] = (char)('0' + (fp / 10U)); }
-  if ((j + 1U) < out_size) { out[j++] = (char)('0' + (fp % 10U)); }
+  div = scale / 10U;
+  for (uint8_t i = 0U; i < frac; i++)
+  {
+    if ((j + 1U) < out_size) { out[j++] = (char)('0' + (fp / div) % 10U); }
+    div /= 10U;
+  }
   out[j] = '\0';
+}
+
+/* 把结果（实数或复数）变成显示字符串，返回长度。
+ * 复数格式："a+bi" / "a-bi"；某个分量近似为 0 时省略（2@90 → "2.00i"）。
+ * 近似阈值 = 半个显示单位，和 app_format_float 的归零口径一致。 */
+static uint8_t app_format_value(const calc_complex_t *v, char *r, uint8_t size)
+{
+  float   eps = 0.5f;
+  uint8_t j = 0U;
+  uint8_t show_im;
+
+  for (uint8_t i = 0U; i < s_frac_digits; i++)
+  {
+    eps /= 10.0f;                      /* 0.5 / 10^frac */
+  }
+  show_im = !((v->imag > -eps) && (v->imag < eps));  /* 虚部≈0 → 按实数显示 */
+
+  /* 实部：仅当它有存在感时输出 */
+  if ((show_im == 0U) || !((v->real > -eps) && (v->real < eps)))
+  {
+    app_format_float(v->real, r, size, s_frac_digits);
+    while (r[j] != '\0')
+    {
+      j++;
+    }
+  }
+  else
+  {
+    r[0] = '\0';                       /* 实部≈0 且虚部非零：只显示虚部 */
+  }
+
+  if (show_im != 0U)
+  {
+    char  t[20];
+    float ai = v->imag;
+    char  sc = '+';
+
+    if (ai < 0.0f)
+    {
+      sc = '-';
+      ai = -ai;
+    }
+    app_format_float(ai, t, (uint8_t)sizeof(t), s_frac_digits);
+    if ((j + 1U) < size) { r[j++] = sc; }
+    for (uint8_t i = 0U; t[i] != '\0' && (j + 1U) < size; i++)
+    {
+      r[j++] = t[i];
+    }
+    if ((j + 1U) < size) { r[j++] = 'i'; }
+  }
+  r[j] = '\0';
+  return j;
 }
 
 /* '='：求值 → 显示 → 结果回填（供继续运算），模仿卡西欧的连续计算手感。
@@ -647,9 +734,10 @@ static void app_calc_evaluate(void)
 {
   calc_complex_t res;
   calc_status_t  st;
-  char    r[20];
+  char    r[48];
   char    line1[17];
   uint8_t rlen;
+  uint8_t fill;
 
   if (s_expr_len == 0U)
   {
@@ -665,24 +753,40 @@ static void app_calc_evaluate(void)
   if (st == CALC_OK)
   {
     app_undo_push();      /* 记撤销点：按 BACK 可回到求值前的表达式 */
-    app_format_float(res.real, r, (uint8_t)sizeof(r));
-    rlen = app_len16(r);
+    rlen = app_format_value(&res, r, (uint8_t)sizeof(r));
 
-    /* 显示行："=" + 结果，例如 "=7.00" */
-    line1[0] = '=';
-    for (uint8_t i = 0U; i < rlen; i++)
+    /* 显示行："=" + 结果（例 "=7.00"、"=-5.00+10.00i"）；
+     * 结果超过 15 字符时显示尾部（保住虚部信息） */
+    if (rlen <= 15U)
     {
-      line1[1U + i] = r[i];
+      line1[0] = '=';
+      for (uint8_t i = 0U; i < rlen; i++)
+      {
+        line1[1U + i] = r[i];
+      }
+      line1[1U + rlen] = '\0';
     }
-    line1[1U + rlen] = '\0';
+    else
+    {
+      uint8_t off = (uint8_t)(rlen - 15U);
 
-    /* 回填：s_expr 变成结果字符串（含结尾 '\0'），按运算符可接着算；
+      for (uint8_t i = 0U; i < 15U; i++)
+      {
+        line1[i] = r[off + i];
+      }
+      line1[15] = '\0';
+    }
+
+    /* 回填：s_expr 变成结果字符串——复数带隐式乘法记号（"10.00i"），
+     * 引擎可直接再解析；超长结果按缓冲上限截断。
      * just_eval=1 → 下一次按数字则开新算式（卡西欧式行为） */
-    for (uint8_t i = 0U; i <= rlen; i++)
+    fill = (rlen > (uint8_t)(sizeof(s_expr) - 1U)) ? (uint8_t)(sizeof(s_expr) - 1U) : rlen;
+    for (uint8_t i = 0U; i < fill; i++)
     {
       s_expr[i] = r[i];
     }
-    s_expr_len = rlen;
+    s_expr[fill] = '\0';
+    s_expr_len = fill;
     s_just_eval = 1U;
 
     app_display(line1, "BACK=undo AC=clr");
@@ -690,6 +794,10 @@ static void app_calc_evaluate(void)
   else if (st == CALC_DIV_ZERO)
   {
     app_display(s_expr, "! div by 0");
+  }
+  else if (st == CALC_DOMAIN)
+  {
+    app_display(s_expr, "! domain");
   }
   else
   {

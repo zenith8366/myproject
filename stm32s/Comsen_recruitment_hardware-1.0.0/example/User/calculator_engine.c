@@ -9,26 +9,86 @@
  *                                     calc_complex_t *result);
  *   calc_status_t calculator_solve_linear(float a, float b, float *x);
  *
- * 【文法】三层递归下降 + 一元/主元层（D7 任务 5 升级版）：
- *   expression := term  (('+' | '-') term)*
- *   term       := factor (('*' | '/') factor)*
+ * 【文法】三层递归下降（全复数域运算）：
+ *   expression := term (('+' | '-' | '@') term)*
+ *   term       := factor (('*' | '/') factor | 隐式乘法)*
  *   factor     := ('+' | '-') factor | primary
  *   primary    := number | '(' expression ')' | 常数 | 函数 '(' expression ')'
  *   number     := 数字[.数字][E[+/-]数字]        （E = ×10^x，T27 键）
- *   常数：pi、e          函数：sin( cos( tan( log( ln( sqrt(
+ *   常数：pi、e、i       函数：sin( cos( tan( log( ln( sqrt(
  *
- * sin/cos/tan 的角度/弧度由 angle_unit 参数决定（App 里 MODE 菜单的全局设置）。
+ * 【复数】（COMPLX 模式，allow_complex=1）：
+ *   - i 虚数单位、四则运算全复数域（乘/除按复数公式）；
+ *   - '@' 极坐标算子：a@θ = a·(cosθ + i·sinθ)，θ 的单位听 angle_unit
+ *     （这就是"角度/弧度换算"——DEG 时 θ° 先换成弧度再算）；
+ *   - sqrt 负数出纯虚数（√(r∠θ) = √r∠θ/2）；log/ln 支持复数（ln|z|+i·arg z）；
+ *   - sin/cos/tan 暂不支持复数参数（返回 CALC_DOMAIN）。
+ * COMP 模式（allow_complex=0）下 sqrt 负数给 NaN（App 显示 Error）。
+ *
  * 数学函数用 libm（CMakeLists 链接 m）；不用 printf。
  * ========================================================================== */
 
 #include "calculator_engine.h"
-#include <math.h>              /* sinf / cosf / tanf / log10f / logf / sqrtf */
+#include <math.h>              /* sinf/cosf/tanf/log10f/logf/sqrtf/hypotf/atan2f */
 
-#define CALC_PI   3.14159265358979f
-#define CALC_E    2.71828182845905f
+#define CALC_PI    3.14159265358979f
+#define CALC_E     2.71828182845905f
+#define CALC_LN10  2.30258509299405f
 
-/* 读一个数字：整数[.小数][E[+/-]指数]。正负号不在这层（归 parse_factor 的一元层） */
-static calc_status_t parse_number(const char **p, float *out)
+/* 解析上下文：角度制 / 是否允许复数（由 calculator_evaluate 的参数带入） */
+typedef struct
+{
+  calc_angle_unit_t unit;
+  uint8_t           allow_complex;
+} parse_ctx_t;
+
+/* ------------------------------ 复数小工具 ------------------------------- */
+
+static calc_complex_t cx_make(float re, float im)
+{
+  calc_complex_t c;
+
+  /* -0.0 归一成 +0.0：负零会让 atan2(±0, 负数) 的辐角符号翻车
+   *（sqrt(-4) 会算成 -2i、ln(-1) 会算成 -iπ），显示上也会冒 "-0.00"。 */
+  c.real = (re == 0.0f) ? 0.0f : re;
+  c.imag = (im == 0.0f) ? 0.0f : im;
+  return c;
+}
+
+static calc_complex_t cx_add(calc_complex_t a, calc_complex_t b)
+{
+  return cx_make(a.real + b.real, a.imag + b.imag);
+}
+
+static calc_complex_t cx_sub(calc_complex_t a, calc_complex_t b)
+{
+  return cx_make(a.real - b.real, a.imag - b.imag);
+}
+
+static calc_complex_t cx_mul(calc_complex_t a, calc_complex_t b)
+{
+  return cx_make(a.real * b.real - a.imag * b.imag,
+                 a.real * b.imag + a.imag * b.real);
+}
+
+/* 复数除法：(a+bi)/(c+di) = ((ac+bd) + (bc-ad)i) / (c²+d²) */
+static calc_status_t cx_div(calc_complex_t a, calc_complex_t b, calc_complex_t *out)
+{
+  float denom = b.real * b.real + b.imag * b.imag;
+
+  if (denom == 0.0f)
+  {
+    return CALC_DIV_ZERO;
+  }
+  out->real = (a.real * b.real + a.imag * b.imag) / denom;
+  out->imag = (a.imag * b.real - a.real * b.imag) / denom;
+  return CALC_OK;
+}
+
+/* ------------------------------- 词法/语法 -------------------------------- */
+
+/* 读一个数字（纯数字部分；正负号归 parse_factor，复数单位 i 归 primary） */
+static calc_status_t parse_number(const char **p, calc_complex_t *out)
 {
   const char *s = *p;
   float v = 0.0f;
@@ -92,21 +152,21 @@ static calc_status_t parse_number(const char **p, float *out)
     }
   }
   *p = s;
-  *out = v;
+  *out = cx_make(v, 0.0f);
   return CALC_OK;
 }
 
 /* 前向声明：primary ↔ expression 互相递归调用 */
-static calc_status_t parse_expression(const char **p, float *out, calc_angle_unit_t unit);
+static calc_status_t parse_expression(const char **p, calc_complex_t *out,
+                                      const parse_ctx_t *ctx);
 
-/* 函数：名字开头已在游标处，吃掉 "名字( 表达式 )" 并计算。
- * 成功返回 CALC_OK；名字不认识 / 缺括号 → CALC_SYNTAX。
- * 定义域外（log 非正、sqrt 负数）交给 libm 产生 NaN/-inf，
- * 由 App 的格式化层的范围检查显示 "Error"——不崩、不卡。 */
-static calc_status_t parse_function(const char **p, float *out, calc_angle_unit_t unit)
+/* 函数：吃掉 "名字( 表达式 )" 并计算。
+ * 实数参数走实数库函数；复数参数见开头注释的功能范围。 */
+static calc_status_t parse_function(const char **p, calc_complex_t *out,
+                                    const parse_ctx_t *ctx)
 {
   const char *s = *p;
-  float v;
+  calc_complex_t v;
   calc_status_t st;
   uint8_t kind;
 
@@ -150,7 +210,7 @@ static calc_status_t parse_function(const char **p, float *out, calc_angle_unit_
     return CALC_SYNTAX;
   }
   s++;
-  st = parse_expression(&s, &v, unit);
+  st = parse_expression(&s, &v, ctx);
   if (st != CALC_OK)
   {
     return st;
@@ -161,38 +221,80 @@ static calc_status_t parse_function(const char **p, float *out, calc_angle_unit_
   }
   s++;
 
-  switch (kind)
+  if (kind <= 2U)                      /* sin / cos / tan：暂不支持复数参数 */
   {
-    case 0U:                           /* sin：角度制先度→弧度 */
-      if (unit == CALC_ANGLE_DEG)
+    float x;
+
+    if (v.imag != 0.0f)
+    {
+      return CALC_DOMAIN;
+    }
+    x = v.real;
+    if (ctx->unit == CALC_ANGLE_DEG)
+    {
+      x = x * (CALC_PI / 180.0f);      /* 角度制 → 弧度（角度/弧度换算） */
+    }
+    v = cx_make((kind == 0U) ? sinf(x) : ((kind == 1U) ? cosf(x) : tanf(x)), 0.0f);
+  }
+  else if (kind <= 4U)                 /* log（10 底）/ ln（e 底） */
+  {
+    if (v.imag != 0.0f || (v.real < 0.0f && ctx->allow_complex != 0U))
+    {
+      if (ctx->allow_complex == 0U)
       {
-        v = v * (CALC_PI / 180.0f);
+        if (v.imag != 0.0f)
+        {
+          return CALC_DOMAIN;          /* COMP 模式拒绝复数参数 */
+        }
+        /* 负实数的 log 交给库函数产生 NaN，App 显示 Error */
+        v = cx_make((kind == 3U) ? log10f(v.real) : logf(v.real), 0.0f);
       }
-      v = sinf(v);
-      break;
-    case 1U:                           /* cos */
-      if (unit == CALC_ANGLE_DEG)
+      else
       {
-        v = v * (CALC_PI / 180.0f);
+        /* 复数对数：ln(z) = ln|z| + i·arg(z)；log10(z) = ln(z)/ln10 */
+        float m = hypotf(v.real, v.imag);
+        float a = atan2f(v.imag, v.real);
+        float l = logf(m);
+
+        if (kind == 3U)
+        {
+          l /= CALC_LN10;
+          a /= CALC_LN10;
+        }
+        v = cx_make(l, a);
       }
-      v = cosf(v);
-      break;
-    case 2U:                           /* tan */
-      if (unit == CALC_ANGLE_DEG)
+    }
+    else
+    {
+      v = cx_make((kind == 3U) ? log10f(v.real) : logf(v.real), 0.0f);
+    }
+  }
+  else                                 /* sqrt（根号） */
+  {
+    if (v.imag != 0.0f || (v.real < 0.0f && ctx->allow_complex != 0U))
+    {
+      if (ctx->allow_complex == 0U)
       {
-        v = v * (CALC_PI / 180.0f);
+        if (v.imag != 0.0f)
+        {
+          return CALC_DOMAIN;          /* COMP 模式拒绝复数参数 */
+        }
+        v = cx_make(sqrtf(v.real), 0.0f);   /* 负数 → NaN → App 显示 Error */
       }
-      v = tanf(v);
-      break;
-    case 3U:                           /* log：10 底 */
-      v = log10f(v);
-      break;
-    case 4U:                           /* ln：e 底 */
-      v = logf(v);
-      break;
-    default:                           /* sqrt：根号 */
-      v = sqrtf(v);
-      break;
+      else
+      {
+        /* 极坐标半角：√(r∠θ) = √r ∠(θ/2)（sqrt(-4) → 2i） */
+        float m = hypotf(v.real, v.imag);
+        float a = atan2f(v.imag, v.real) * 0.5f;
+        float r = sqrtf(m);
+
+        v = cx_make(r * cosf(a), r * sinf(a));
+      }
+    }
+    else
+    {
+      v = cx_make(sqrtf(v.real), 0.0f);
+    }
   }
 
   *p = s;
@@ -200,8 +302,9 @@ static calc_status_t parse_function(const char **p, float *out, calc_angle_unit_
   return CALC_OK;
 }
 
-/* 主元：数字 | '(' 表达式 ')' | 常数 pi / e | 函数 */
-static calc_status_t parse_primary(const char **p, float *out, calc_angle_unit_t unit)
+/* 主元：数字 | '(' 表达式 ')' | 常数 pi / e / i | 函数 */
+static calc_status_t parse_primary(const char **p, calc_complex_t *out,
+                                   const parse_ctx_t *ctx)
 {
   const char *s = *p;
 
@@ -210,7 +313,7 @@ static calc_status_t parse_primary(const char **p, float *out, calc_angle_unit_t
     calc_status_t st;
 
     s++;
-    st = parse_expression(&s, out, unit);
+    st = parse_expression(&s, out, ctx);
     if (st != CALC_OK)
     {
       return st;
@@ -225,83 +328,101 @@ static calc_status_t parse_primary(const char **p, float *out, calc_angle_unit_t
   if (s[0] == 'p' && s[1] == 'i')      /* 常数 π（按键：SHIFT+7） */
   {
     *p = s + 2;
-    *out = CALC_PI;
+    *out = cx_make(CALC_PI, 0.0f);
     return CALC_OK;
   }
   if (s[0] == 'e')                     /* 常数 e（按键：SHIFT+4） */
   {
     *p = s + 1;
-    *out = CALC_E;
+    *out = cx_make(CALC_E, 0.0f);
     return CALC_OK;
   }
-  if (s[0] >= 'a' && s[0] <= 'z')      /* 字母开头 → 函数（不认识就报语法错） */
+  if (s[0] == 'i')                     /* 虚数单位（按键：SHIFT+9，COMPLX 模式） */
   {
-    return parse_function(p, out, unit);
+    *p = s + 1;
+    *out = cx_make(0.0f, 1.0f);
+    return CALC_OK;
+  }
+  if (s[0] >= 'a' && s[0] <= 'z')      /* 其它字母开头 → 函数（不认识就报语法错） */
+  {
+    return parse_function(p, out, ctx);
   }
   return parse_number(p, out);
 }
 
 /* 因子：一元 + / - 前缀，后面跟主元。支持 "-5+3"、"3+-4"、"(-2)" */
-static calc_status_t parse_factor(const char **p, float *out, calc_angle_unit_t unit)
+static calc_status_t parse_factor(const char **p, calc_complex_t *out,
+                                  const parse_ctx_t *ctx)
 {
   const char *s = *p;
 
   if (*s == '+')
   {
     *p = s + 1;
-    return parse_factor(p, out, unit);
+    return parse_factor(p, out, ctx);
   }
   if (*s == '-')
   {
     calc_status_t st;
 
     *p = s + 1;
-    st = parse_factor(p, out, unit);
+    st = parse_factor(p, out, ctx);
     if (st == CALC_OK)
     {
-      *out = -*out;
+      *out = cx_make(-out->real, -out->imag);
     }
     return st;
   }
-  return parse_primary(p, out, unit);
+  return parse_primary(p, out, ctx);
 }
 
-/* 读"一项"：因子（含内部的所有 * / 运算）。
- * 例：读到 "2*(3+4)+5" 时，吃掉 "2*(3+4)"，返回 14，游标停在 '+'。 */
-static calc_status_t parse_term(const char **p, float *out, calc_angle_unit_t unit)
+/* 读"一项"：因子 + 乘除（含隐式乘法："2pi"、"3sin(30)"、"10.00i"）。 */
+static calc_status_t parse_term(const char **p, calc_complex_t *out,
+                                const parse_ctx_t *ctx)
 {
   const char *s = *p;
-  float v;
+  calc_complex_t v;
   calc_status_t st;
 
-  st = parse_factor(&s, &v, unit);
+  st = parse_factor(&s, &v, ctx);
   if (st != CALC_OK)
   {
     return st;
   }
 
-  while (*s == '*' || *s == '/')
+  /* 显式 * / ；或隐式乘法（下一个 token 是"因子开头"：数字/字母/'('）——
+   * 这让回填的结果串（如 "-5.00+10.00i"）可以直接再解析。 */
+  while (*s == '*' || *s == '/' || *s == '(' ||
+         (*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'z'))
   {
     char  op = *s;
-    float rhs;
+    calc_complex_t rhs;
 
-    s++;
-    st = parse_factor(&s, &rhs, unit);
+    if (op == '*' || op == '/')
+    {
+      s++;
+    }
+    else
+    {
+      op = '*';                        /* 隐式乘法：不消耗字符，直接读下一个因子 */
+    }
+
+    st = parse_factor(&s, &rhs, ctx);
     if (st != CALC_OK)
     {
       return CALC_SYNTAX;              /* 例："2*" 后面没数 */
     }
     if (op == '/')
     {
-      if (rhs == 0.0f)
+      st = cx_div(v, rhs, &v);
+      if (st != CALC_OK)
       {
-        return CALC_DIV_ZERO;          /* 除零：给专用提示，不崩不卡 */
+        return st;                     /* 除零（实部虚部同时为 0 时） */
       }
-      v = v / rhs;
     }
     else
     {
-      v = v * rhs;
+      v = cx_mul(v, rhs);
     }
   }
 
@@ -310,31 +431,52 @@ static calc_status_t parse_term(const char **p, float *out, calc_angle_unit_t un
   return CALC_OK;
 }
 
-/* 加减扫描：把一个个"项"用 + / - 连起来（最低优先级） */
-static calc_status_t parse_expression(const char **p, float *out, calc_angle_unit_t unit)
+/* 加减 + 极坐标扫描：
+ *   a + b / a - b：复数加减；
+ *   a@θ：极坐标——a·(cosθ + i·sinθ)，θ 按 angle_unit 换算（角度/弧度）。 */
+static calc_status_t parse_expression(const char **p, calc_complex_t *out,
+                                      const parse_ctx_t *ctx)
 {
   const char *q = *p;
-  float acc;
-  float term;
+  calc_complex_t acc;
+  calc_complex_t term;
   calc_status_t st;
 
-  st = parse_term(&q, &acc, unit);
+  st = parse_term(&q, &acc, ctx);
   if (st != CALC_OK)
   {
     return st;
   }
 
-  while (*q == '+' || *q == '-')
+  while (*q == '+' || *q == '-' || *q == '@')
   {
     char op = *q;
 
     q++;
-    st = parse_term(&q, &term, unit);
+    st = parse_term(&q, &term, ctx);
     if (st != CALC_OK)
     {
       return st;
     }
-    acc = (op == '+') ? (acc + term) : (acc - term);
+    if (op == '+')
+    {
+      acc = cx_add(acc, term);
+    }
+    else if (op == '-')
+    {
+      acc = cx_sub(acc, term);
+    }
+    else                           /* '@'：极坐标 a∠θ */
+    {
+      float m  = hypotf(acc.real, acc.imag);   /* 模（输入通常是实数，兼容复数） */
+      float th = term.real;                    /* 辐角取实部 */
+
+      if (ctx->unit == CALC_ANGLE_DEG)
+      {
+        th = th * (CALC_PI / 180.0f);          /* DEG → RAD（角度/弧度换算） */
+      }
+      acc = cx_make(m * cosf(th), m * sinf(th));
+    }
   }
 
   *p = q;
@@ -350,15 +492,17 @@ calc_status_t calculator_evaluate(const char *expression,
                                   calc_complex_t *result)
 {
   const char *p = expression;
-  float v;
+  parse_ctx_t ctx;
+  calc_complex_t v;
   calc_status_t st;
 
-  /* COMPLX（复数）模式目前只做了"入口"：求值本体仍按实数计算；
-   * answer（按值传参）暂未使用——留给以后的 ANS 回填。 */
-  (void)allow_complex;
+  /* answer（按值传参）暂未使用——留给以后的 ANS 回填 */
   (void)answer;
 
-  st = parse_expression(&p, &v, angle_unit);
+  ctx.unit = angle_unit;
+  ctx.allow_complex = allow_complex;
+
+  st = parse_expression(&p, &v, &ctx);
   if (st != CALC_OK)
   {
     return st;
@@ -368,8 +512,7 @@ calc_status_t calculator_evaluate(const char *expression,
     return CALC_SYNTAX;        /* 尾巴没吃完，比如 "3+"、"1+2)" */
   }
 
-  result->real = v;
-  result->imag = 0.0f;
+  *result = v;
   return CALC_OK;
 }
 
