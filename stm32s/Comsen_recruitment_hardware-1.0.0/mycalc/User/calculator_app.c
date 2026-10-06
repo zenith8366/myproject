@@ -263,9 +263,9 @@ static void app_usb_poll(void)
  * 已启用：数字 / 小数点 / * ÷ + - / 括号 / AC / 撤销(BACK) / 删除(DEL) / 求值(EXE)；
  * MODE = 设置菜单（COMP/CMPLX、DEG/RAD 全局设置，OK 确认退出）；x10^x(T27) = 科学计数记号的 'E'；
  * SHIFT = 修饰状态键：按后下一键出副功能（见 app_shift_alt）——7→π、4→e、5→log(、
- * 6→ln(、1→sin(、2→cos(、3→tan(、÷→sqrt(；8→∠、9→i、*→x^y 属复数/幂运算，暂未支持。
- * FMT(T28) = 显示精度切换（2 / 4 / 6 位小数）；方向键 = 编辑光标移动；
- * OK(T4) = MODE 菜单的确认/退出键（仅菜单内有效，菜单外按下无动作）。 */
+ * 6→ln(、1→sin(、2→cos(、3→tan(、÷→sqrt(、*→x^y 幂运算；8→∠、9→i 仅 COMPLX 模式。
+ * FMT(T28) = 显示精度设置（2 / 4 / 6 位小数；FMT 循环切换、OK 退出）；
+ * 方向键 = 编辑光标移动；OK(T4) = MODE / FMT 界面的确认退出键（其它场景按下无动作）。 */
 #define APP_CH_AC    0x01U   /* AC：全清 */
 #define APP_CH_UNDO  0x08U   /* BACK：撤销（式子粒度回滚，深度 8） */
 #define APP_CH_DEL   0x7FU   /* DEL：删除光标左侧一个字符 */
@@ -296,6 +296,7 @@ static uint8_t s_shift_active;   /* SHIFT 修饰态：下一次按键消费掉�
 static uint8_t s_cmplx_mode;     /* 计算模式：0=COMP，1=CMPLX（MODE 菜单里切换） */
 static uint8_t s_angle_rad;      /* 角度制：0=DEG（角度），1=RAD（弧度）；全局设置 */
 static uint8_t s_mode_menu;      /* 1 = 正在 MODE 设置菜单里 */
+static uint8_t s_fmt_menu;       /* 1 = 正在 FMT 精度设置里（模态：OK 退出） */
 static uint8_t s_frac_digits = 2U;  /* FMT：结果显示的小数位数（2 / 4 / 6） */
 static uint8_t s_cursor;            /* 编辑光标：表达式内索引（0 ~ s_expr_len，≤31） */
 
@@ -370,9 +371,10 @@ static const char *app_shift_alt(uint8_t c)
     case '2': return "cos(";
     case '3': return "tan(";
     case '/': return "sqrt(";
+    case '*': return "^";                                 /* x^y 幂运算 */
     case '9': return (s_cmplx_mode != 0U) ? "i" : NULL;   /* 虚数单位：仅 COMPLX 模式 */
     case '8': return (s_cmplx_mode != 0U) ? "@" : NULL;   /* 极坐标 a@θ：仅 COMPLX 模式 */
-    default:  return NULL;      /* *→x^y 幂运算暂未支持 */
+    default:  return NULL;
   }
 }
 
@@ -402,6 +404,36 @@ static void app_mode_menu_show(void)
   t[j] = '\0';
 
   app_display("1:CMPLX 2:ANGLE", t);
+}
+
+/* FMT：切到下一档显示精度（2 → 4 → 6 → 2）并刷新 "FIX:n [OK]" 提示。
+ * 第二行强制显示提示（表达式超过 16 字符时暂盖住第二行，退出后恢复编辑视图），
+ * 保证 FMT 模态里"看得见"当前档位与退出方式。 */
+static void app_fmt_step(void)
+{
+  char l1[16];
+  char l2[16];
+  char t[12];
+
+  s_frac_digits = (s_frac_digits == 2U) ? 4U : ((s_frac_digits == 4U) ? 6U : 2U);
+  t[0] = 'F'; t[1] = 'I'; t[2] = 'X'; t[3] = ':'; t[4] = ' ';
+  t[5] = (char)('0' + s_frac_digits);
+  t[6] = ' '; t[7] = '['; t[8] = 'O'; t[9] = 'K'; t[10] = ']';
+  t[11] = '\0';
+
+  for (uint8_t k = 0U; k < 16U; k++)
+  {
+    l1[k] = (k < s_expr_len) ? s_expr[k] : ' ';
+  }
+  if (s_expr_len == 0U)
+  {
+    l1[0] = '0';                       /* 与编辑视图一致：空表达式显示 "0" */
+  }
+  app_fill16(l2, t);
+
+  app_display_ex(l1, l2, 1U,
+                 (s_cursor >= 16U) ? 1U : 0U,
+                 (uint8_t)(s_cursor % 16U));
 }
 
 /* 编辑视图显示：表达式分两行铺满屏（每行 16 字符，最长 31 字符正好放下），
@@ -478,7 +510,7 @@ static void app_calc_put(uint8_t c)
 
   if (s_just_eval != 0U)
   {
-    if (!((c == '+') || (c == '-') || (c == '*') || (c == '/') || (c == 'E')))
+    if (!((c == '+') || (c == '-') || (c == '*') || (c == '/') || (c == 'E') || (c == '^')))
     {
       s_expr_len = 0U;
       s_expr[0] = '\0';
@@ -535,7 +567,23 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 0.5) OK：MODE 菜单的确认键；菜单外按下不产生任何动作。
+  /* 0.2) FMT 精度设置模态：FMT 循环切换 2 → 4 → 6 → 2，按 OK 确认退出；
+   *      其它键一律无反应（与 MODE 菜单同款"只能 OK 退出"规则）。 */
+  if (s_fmt_menu != 0U)
+  {
+    if (c == APP_CH_FMT)
+    {
+      app_fmt_step();
+    }
+    else if (c == APP_CH_OK)
+    {
+      s_fmt_menu = 0U;
+      app_calc_show();
+    }
+    return;
+  }
+
+  /* 0.5) OK：MODE / FMT 界面的确认键；都不在时按下不产生任何动作。
    *      刻意放在 SHIFT 消费之前——SHIFT+OK 不吞 SHIFT 修饰态（OK 视为不存在）。 */
   if (c == APP_CH_OK)
   {
@@ -575,16 +623,11 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 3.5) FMT：循环切换显示精度 2 → 4 → 6 → 2，第二行提示当前设置 */
+  /* 3.5) FMT：进入精度设置模态（模态内 FMT 循环切换、OK 退出、其它键无反应） */
   if (c == APP_CH_FMT)
   {
-    char t[8];
-
-    s_frac_digits = (s_frac_digits == 2U) ? 4U : ((s_frac_digits == 4U) ? 6U : 2U);
-    t[0] = 'F'; t[1] = 'I'; t[2] = 'X'; t[3] = ':'; t[4] = ' ';
-    t[5] = (char)('0' + s_frac_digits);
-    t[6] = '\0';
-    app_calc_show_hint(t);
+    s_fmt_menu = 1U;
+    app_fmt_step();
     return;
   }
 

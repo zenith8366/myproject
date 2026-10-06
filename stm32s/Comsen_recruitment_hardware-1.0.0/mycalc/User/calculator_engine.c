@@ -9,10 +9,11 @@
  *                                     calc_complex_t *result);
  *   calc_status_t calculator_solve_linear(float a, float b, float *x);
  *
- * 【文法】三层递归下降（全复数域运算）：
+ * 【文法】四层递归下降（全复数域运算）：
  *   expression := term (('+' | '-' | '@') term)*
  *   term       := factor (('*' | '/') factor | 隐式乘法)*
- *   factor     := ('+' | '-') factor | primary
+ *   factor     := ('+' | '-') factor | power
+ *   power      := primary ('^' factor)?          （^ = 幂运算，右结合；SHIFT+* 输入）
  *   primary    := number | '(' expression ')' | 常数 | 函数 '(' expression ')'
  *   number     := 数字[.数字][E[+/-]数字]        （E = ×10^x，T27 键）
  *   常数：pi、e、i       函数：sin( cos( tan( log( ln( sqrt(
@@ -22,6 +23,8 @@
  *   - '@' 极坐标算子：a@θ = a·(cosθ + i·sinθ)，θ 的单位听 angle_unit
  *     （这就是"角度/弧度换算"——DEG 时 θ° 先换成弧度再算）；
  *   - sqrt 负数出纯虚数（√(r∠θ) = √r∠θ/2）；log/ln 支持复数（ln|z|+i·arg z）；
+ *   - 幂：z^w = e^(w·Ln z)，负底数的非整数次幂出主值复数（(-1)^0.5 = i）；
+ *     双实数时直接 powf（(-2)^3 = -8 走实数路径）；
  *   - sin/cos/tan 暂不支持复数参数（返回 CALC_DOMAIN）。
  * COMP 模式（allow_complex=0）下 sqrt 负数给 NaN（App 显示 Error）。
  *
@@ -34,6 +37,7 @@
 #define CALC_PI    3.14159265358979f
 #define CALC_E     2.71828182845905f
 #define CALC_LN10  2.30258509299405f
+#define CALC_TAN_EPS 1.0e-6f   /* tan 判域阈值：|cos| 小于它视为 π/2+kπ（无定义） */
 
 /* 解析上下文：角度制 / 是否允许复数（由 calculator_evaluate 的参数带入） */
 typedef struct
@@ -83,6 +87,51 @@ static calc_status_t cx_div(calc_complex_t a, calc_complex_t b, calc_complex_t *
   out->real = (a.real * b.real + a.imag * b.imag) / denom;
   out->imag = (a.imag * b.real - a.real * b.imag) / denom;
   return CALC_OK;
+}
+
+/* 幂运算 a^b（'^'，SHIFT+* 输入）：
+ *   - 双实数且"实数可算"：直接 powf（(-2)^3 = -8；0^0 = 1）；
+ *     域外结果（如 COMP 模式的 (-8)^0.5）得 NaN，App 显示 Error；
+ *   - 负底数 + 非整数指数、或有虚部参与：z^w = e^(w·Ln z)（仅 COMPLX 模式）——
+ *     主值复数：(-1)^0.5 = i；2^i = cos(ln2)+i·sin(ln2)。 */
+static calc_status_t cx_pow(calc_complex_t a, calc_complex_t b,
+                            const parse_ctx_t *ctx, calc_complex_t *out)
+{
+  if ((a.imag == 0.0f) && (b.imag == 0.0f))
+  {
+    /* 负底数的非整数次幂在实数域无定义——COMPLX 模式让它掉进下面的复数路径 */
+    if (!((a.real < 0.0f) && (b.real != floorf(b.real)) && (ctx->allow_complex != 0U)))
+    {
+      out->real = powf(a.real, b.real);
+      out->imag = 0.0f;
+      return CALC_OK;
+    }
+  }
+  else if (ctx->allow_complex == 0U)
+  {
+    return CALC_DOMAIN;                /* COMP 模式拒绝复数参与 */
+  }
+
+  if ((a.real == 0.0f) && (a.imag == 0.0f))
+  {
+    if (b.real > 0.0f)                 /* 0^正数 = 0（0 的实数正幂） */
+    {
+      *out = cx_make(0.0f, 0.0f);
+      return CALC_OK;
+    }
+    return CALC_DIV_ZERO;              /* 0^非正：无定义 / 除零 */
+  }
+
+  {
+    float lr = logf(hypotf(a.real, a.imag));    /* Ln z = ln|z| + i·arg z */
+    float li = atan2f(a.imag, a.real);
+    float er = b.real * lr - b.imag * li;       /* w·Ln z 的实部 */
+    float ei = b.real * li + b.imag * lr;       /* w·Ln z 的虚部 */
+    float em = expf(er);                        /* e^(w·Ln z) */
+
+    *out = cx_make(em * cosf(ei), em * sinf(ei));
+    return CALC_OK;
+  }
 }
 
 /* ------------------------------- 词法/语法 -------------------------------- */
@@ -234,7 +283,25 @@ static calc_status_t parse_function(const char **p, calc_complex_t *out,
     {
       x = x * (CALC_PI / 180.0f);      /* 角度制 → 弧度（角度/弧度换算） */
     }
-    v = cx_make((kind == 0U) ? sinf(x) : ((kind == 1U) ? cosf(x) : tanf(x)), 0.0f);
+    if (kind == 0U)
+    {
+      v = cx_make(sinf(x), 0.0f);
+    }
+    else if (kind == 1U)
+    {
+      v = cx_make(cosf(x), 0.0f);
+    }
+    else if (fabsf(cosf(x)) < CALC_TAN_EPS)
+    {
+      /* tan 在 π/2 + kπ 处数学上无定义。float 的 π/2 自身约有 4e-8 的误差，
+       * 直接 tanf() 会吐出一个巨大的伪值（tan(90°) ≈ -2.3e7）而不是报错——
+       * 这里主动判域：|cos| 小于阈值即视为无定义，给 NaN 让 App 显示 Error。 */
+      v = cx_make(NAN, 0.0f);
+    }
+    else
+    {
+      v = cx_make(tanf(x), 0.0f);
+    }
   }
   else if (kind <= 4U)                 /* log（10 底）/ ln（e 底） */
   {
@@ -350,7 +417,47 @@ static calc_status_t parse_primary(const char **p, calc_complex_t *out,
   return parse_number(p, out);
 }
 
-/* 因子：一元 + / - 前缀，后面跟主元。支持 "-5+3"、"3+-4"、"(-2)" */
+/* 前向声明：power 的右操作数要递归回 factor（右结合 + 允许指数带一元符号） */
+static calc_status_t parse_factor(const char **p, calc_complex_t *out,
+                                  const parse_ctx_t *ctx);
+
+/* 幂：primary ('^' factor)? —— 右结合（2^3^2 = 2^(3^2)）；
+ * 指数走 factor，所以允许一元符号（2^-3）与继续叠幂。
+ * 优先级：高于 * /（2*3^2 = 18）；一元符号比它低（-2^2 = -(2^2) = -4）。 */
+static calc_status_t parse_power(const char **p, calc_complex_t *out,
+                                 const parse_ctx_t *ctx)
+{
+  const char *s = *p;
+  calc_complex_t base;
+  calc_status_t st;
+
+  st = parse_primary(&s, &base, ctx);
+  if (st != CALC_OK)
+  {
+    return st;
+  }
+  if (*s == '^')
+  {
+    calc_complex_t ex;
+
+    s++;
+    st = parse_factor(&s, &ex, ctx);   /* "2^" 后面没数 → 语法错自然上抛 */
+    if (st != CALC_OK)
+    {
+      return st;
+    }
+    st = cx_pow(base, ex, ctx, &base);
+    if (st != CALC_OK)
+    {
+      return st;
+    }
+  }
+  *p = s;
+  *out = base;
+  return CALC_OK;
+}
+
+/* 因子：一元 + / - 前缀，后面跟幂。支持 "-5+3"、"3+-4"、"(-2)" */
 static calc_status_t parse_factor(const char **p, calc_complex_t *out,
                                   const parse_ctx_t *ctx)
 {
@@ -373,7 +480,7 @@ static calc_status_t parse_factor(const char **p, calc_complex_t *out,
     }
     return st;
   }
-  return parse_primary(p, out, ctx);
+  return parse_power(p, out, ctx);
 }
 
 /* 读"一项"：因子 + 乘除（含隐式乘法："2pi"、"3sin(30)"、"10.00i"）。 */
