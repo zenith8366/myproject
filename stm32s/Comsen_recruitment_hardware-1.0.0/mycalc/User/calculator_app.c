@@ -45,6 +45,10 @@ typedef struct
   char             line2[16];   /* LCD 快照第 2 行 */
   volatile uint8_t dirty;       /* 有新内容置 1，lcdTask 显示完清 0 */
 
+  volatile uint8_t cur_on;      /* 编辑光标：1=显示（硬件光标，lcd1602_write_frame） */
+  volatile uint8_t cur_row;     /* 光标行 0/1 */
+  volatile uint8_t cur_col;     /* 光标列 0~15 */
+
   uint8_t          key_fifo[16];/* 按键事件队列：keyTask 写、controllerTask 读 */
   volatile uint8_t key_head;
   volatile uint8_t key_tail;
@@ -97,8 +101,9 @@ static void app_fill16(char out[16], const char *s)
   }
 }
 
-/* 更新"显示快照"。跨任务写共享数据的标准姿势，照抄即可。 */
-static void app_display(const char *l1, const char *l2)
+/* 更新"显示快照"（带编辑光标参数）。跨任务写共享数据的标准姿势，照抄即可。 */
+static void app_display_ex(const char *l1, const char *l2,
+                           uint8_t cur_on, uint8_t cur_row, uint8_t cur_col)
 {
   char     t1[16], t2[16];
   uint32_t pm;
@@ -112,8 +117,17 @@ static void app_display(const char *l1, const char *l2)
     s_app.line1[i] = t1[i];
     s_app.line2[i] = t2[i];
   }
+  s_app.cur_on  = cur_on;
+  s_app.cur_row = cur_row;
+  s_app.cur_col = cur_col;
   s_app.dirty = 1U;
   app_unlock(pm);
+}
+
+/* 不带光标版（菜单 / 结果 / 错误 / 欢迎页等"特殊视图"用） */
+static void app_display(const char *l1, const char *l2)
+{
+  app_display_ex(l1, l2, 0U, 0U, 0U);
 }
 
 /* ------------------------------- D4：按键事件 ----------------------------- */
@@ -250,19 +264,23 @@ static void app_usb_poll(void)
  * MODE = 设置菜单（COMP/CMPLX、DEG/RAD 全局设置）；x10^x(T27) = 科学计数记号的 'E'；
  * SHIFT = 修饰状态键：按后下一键出副功能（见 app_shift_alt）——7→π、4→e、5→log(、
  * 6→ln(、1→sin(、2→cos(、3→tan(、÷→sqrt(；8→∠、9→i、*→x^y 属复数/幂运算，暂未支持。
- * FMT(T28) = 显示精度切换（2 / 4 / 6 位小数）；预留未启用（0xFF）：方向键、OK。 */
+ * FMT(T28) = 显示精度切换（2 / 4 / 6 位小数）；方向键 = 编辑光标移动；预留未启用（0xFF）：OK。 */
 #define APP_CH_AC    0x01U   /* AC：全清 */
 #define APP_CH_UNDO  0x08U   /* BACK：撤销（式子粒度回滚，深度 8） */
-#define APP_CH_DEL   0x7FU   /* DEL：删除最后一个字符 */
+#define APP_CH_DEL   0x7FU   /* DEL：删除光标左侧一个字符 */
 #define APP_CH_EQ    0x0DU   /* =：求值（EXE 键） */
 #define APP_CH_SHIFT 0x02U   /* SHIFT：修饰状态键（副功能见 app_shift_alt） */
 #define APP_CH_MODE  0x04U   /* MODE：设置菜单（COMP/CMPLX、DEG/RAD） */
 #define APP_CH_FMT   0x06U   /* FMT：循环切换显示精度（2 / 4 / 6 位小数） */
+#define APP_CH_UP    0x11U   /* ↑：光标上移一行（-16 字符） */
+#define APP_CH_DOWN  0x12U   /* ↓：光标下移一行（+16 字符） */
+#define APP_CH_LEFT  0x13U   /* ←：光标左移一字符 */
+#define APP_CH_RIGHT 0x14U   /* →：光标右移一字符 */
 
 static const uint8_t s_key_map[30] =
 {
-  /* T0          T1          T2          T3     T4     T5     T6     T7     T8     T9    */
-    APP_CH_SHIFT, APP_CH_UNDO, APP_CH_MODE, 0xFFU, 0xFFU, '(',   ')',   0xFFU, 0xFFU, 0xFFU,
+  /* T0          T1          T2          T3        T4     T5     T6     T7         T8         T9          */
+    APP_CH_SHIFT, APP_CH_UNDO, APP_CH_MODE, APP_CH_UP, 0xFFU, '(',  ')',  APP_CH_LEFT, APP_CH_DOWN, APP_CH_RIGHT,
   /* T10    T11    T12    T13        T14        T15    T16    T17    T18    T19 */
     '7',   '8',   '9',   APP_CH_DEL, APP_CH_AC, '4',   '5',   '6',   '*',   '/',
   /* T20    T21    T22    T23    T24    T25    T26    T27    T28    T29 */
@@ -277,6 +295,7 @@ static uint8_t s_cmplx_mode;     /* 计算模式：0=COMP，1=CMPLX（MODE 菜�
 static uint8_t s_angle_rad;      /* 角度制：0=DEG（角度），1=RAD（弧度）；全局设置 */
 static uint8_t s_mode_menu;      /* 1 = 正在 MODE 设置菜单里 */
 static uint8_t s_frac_digits = 2U;  /* FMT：结果显示的小数位数（2 / 4 / 6） */
+static uint8_t s_cursor;            /* 编辑光标：表达式内索引（0 ~ s_expr_len，≤31） */
 
 /* 撤销栈（BACK 键）：以"式子"为粒度——只在这些时刻记快照：
  *   ① 从"空 / 刚求值(结果)"状态开始输入第一个字符之前（记下式子起点的状态）；
@@ -378,32 +397,32 @@ static void app_mode_menu_show(void)
   app_display("1:CMPLX 2:ANGLE", t);
 }
 
-/* 显示表达式（第二行提示文字由调用者给出）：
- * 超过 16 字符时显示"末尾 15 字符"，最左边放 '>' 提示被截断 */
+/* 编辑视图显示：表达式分两行铺满屏（每行 16 字符，最长 31 字符正好放下），
+ * 硬件光标跟随编辑位置——按方向键移动时刷新这条路径即可"实时跟着动"。
+ * 第二行没被表达式占满（len ≤ 16）时，显示调用者给的提示文字（彩蛋 / EXE to evaluate 等）。 */
 static void app_calc_show_hint(const char *hint)
 {
-  char    t[17];
-  uint8_t start;
-  uint8_t j = 0U;
+  char l1[16];
+  char l2[16];
 
+  for (uint8_t k = 0U; k < 16U; k++)
+  {
+    l1[k] = (k < s_expr_len) ? s_expr[k] : ' ';
+    l2[k] = ((uint8_t)(16U + k) < s_expr_len) ? s_expr[16U + k] : ' ';
+  }
+
+  if (s_expr_len <= 16U)
+  {
+    app_fill16(l2, hint);            /* 第二行空着 → 放提示文字 */
+  }
   if (s_expr_len == 0U)
   {
-    app_display("0", hint);          /* 第一行"0" + 调用者的提示文字 */
-    return;
+    l1[0] = '0';                     /* 空闲主界面第一行显示 "0" */
   }
 
-  start = (s_expr_len > 16U) ? (uint8_t)(s_expr_len - 15U) : 0U;
-  if (start > 0U)
-  {
-    t[j++] = '>';
-  }
-  for (uint8_t k = start; k < s_expr_len; k++)
-  {
-    t[j++] = s_expr[k];
-  }
-  t[j] = '\0';
-
-  app_display(t, hint);
+  app_display_ex(l1, l2, 1U,
+                 (s_cursor >= 16U) ? 1U : 0U,
+                 (uint8_t)(s_cursor % 16U));
 }
 
 /* 主界面空闲态的花样提示（每次进入空闲态时随机选一条） */
@@ -456,14 +475,21 @@ static void app_calc_put(uint8_t c)
     {
       s_expr_len = 0U;
       s_expr[0] = '\0';
+      s_cursor = 0U;                 /* 开新算式：光标回开头 */
     }
     s_just_eval = 0U;
   }
 
   if (s_expr_len < (uint8_t)(sizeof(s_expr) - 1U))
   {
-    s_expr[s_expr_len] = (char)c;
+    /* 在光标处插入：光标之后的字符整体右移一格，光标随输入前进 */
+    for (uint8_t i = s_expr_len; i > s_cursor; i--)
+    {
+      s_expr[i] = s_expr[i - 1U];
+    }
+    s_expr[s_cursor] = (char)c;
     s_expr_len++;
+    s_cursor++;
     s_expr[s_expr_len] = '\0';
   }
 }
@@ -557,6 +583,7 @@ static void app_calc_input(uint8_t c)
     s_expr_len = 0U;
     s_expr[0] = '\0';
     s_just_eval = 0U;
+    s_cursor = 0U;                     /* 清空后光标回开头 */
     app_calc_show();
     return;
   }
@@ -566,19 +593,64 @@ static void app_calc_input(uint8_t c)
   {
     if (app_undo_pop() != 0U)          /* 连 just_eval 一起还原 */
     {
+      s_cursor = s_expr_len;           /* 快照没存光标：回滚后保守地放末尾 */
       app_calc_show();
     }
     return;
   }
 
-  /* 6) DEL：删除最后一个字符（空了就不动）。
+  /* 6) DEL：删除光标左侧那个字符（像退格；光标在开头就不动）。
    * DEL 是对当前式子的编辑、不产生撤销点——BACK 只按"式子"粒度回滚。 */
   if (c == APP_CH_DEL)
   {
-    if (s_expr_len > 0U)
+    if (s_cursor > 0U)
     {
+      for (uint8_t i = s_cursor - 1U; i < s_expr_len; i++)
+      {
+        s_expr[i] = s_expr[i + 1U];    /* 光标之后的字符整体左移一格 */
+      }
       s_expr_len--;
+      s_cursor--;
       s_expr[s_expr_len] = '\0';
+    }
+    app_calc_show();
+    return;
+  }
+
+  /* 6.5) 方向键：移动编辑光标，立即刷新（光标随显示快照到屏上）。
+   *   ←/→：移动一字符；↑/↓：跨行（每行 16 字符；↓ 只在下行有内容时允许） */
+  if (c == APP_CH_LEFT)
+  {
+    if (s_cursor > 0U)
+    {
+      s_cursor--;
+    }
+    app_calc_show();
+    return;
+  }
+  if (c == APP_CH_RIGHT)
+  {
+    if (s_cursor < s_expr_len)
+    {
+      s_cursor++;
+    }
+    app_calc_show();
+    return;
+  }
+  if (c == APP_CH_UP)
+  {
+    if (s_cursor >= 16U)
+    {
+      s_cursor -= 16U;
+    }
+    app_calc_show();
+    return;
+  }
+  if (c == APP_CH_DOWN)
+  {
+    if ((uint8_t)(s_cursor + 16U) <= s_expr_len)
+    {
+      s_cursor += 16U;
     }
     app_calc_show();
     return;
@@ -787,6 +859,7 @@ static void app_calc_evaluate(void)
     }
     s_expr[fill] = '\0';
     s_expr_len = fill;
+    s_cursor = fill;      /* 结果显示/回填后，光标回到末尾 */
     s_just_eval = 1U;
 
     app_display(line1, "BACK=undo AC=clr");
@@ -844,23 +917,28 @@ void calculator_key_task(void)
 /* 显示任务：全工程唯一允许调用 lcd1602_* 的任务（所以它不需要抢锁） */
 void calculator_lcd_task(void)
 {
-  char l1[16], l2[16];
+  char     l1[16], l2[16];
+  uint8_t  cur_on, cur_row, cur_col;
 
   for (;;)
   {
     if (s_app.dirty != 0U)
     {
-      /* 用最短的临界区把快照拷出来 */
+      /* 用最短的临界区把快照（含光标位置）拷出来 */
       uint32_t pm = app_lock();
       for (uint8_t i = 0U; i < 16U; i++)
       {
         l1[i] = s_app.line1[i];
         l2[i] = s_app.line2[i];
       }
+      cur_on  = s_app.cur_on;
+      cur_row = s_app.cur_row;
+      cur_col = s_app.cur_col;
       s_app.dirty = 0U;
       app_unlock(pm);
 
-      lcd1602_write_lines(l1, l2);         /* 慢操作放在临界区外面 */
+      /* 慢操作放在临界区外面；带硬件光标（编辑视图显示，方向键移动即这里跟进） */
+      lcd1602_write_frame(l1, l2, cur_on, cur_row, cur_col);
     }
     osDelay(APP_LCD_PERIOD_MS);
   }
