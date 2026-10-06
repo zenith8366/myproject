@@ -246,21 +246,23 @@ static void app_usb_poll(void)
  *   行5   T20 1(sin)   T21 2(cos)    T22 3(tan)   T23 +         T24 -
  *   行6   T25 0        T26 .         T27 x10^x    T28 FMT(ANS)  T29 EXE
  *
- * D5 已启用：数字 / 小数点 / * ÷ + - / 括号 / AC / 退格 / 求值。
- * 预留未启用（0xFF）：SHIFT、MODE、方向键、OK、x10^x、FMT(ANS)——属任务 5 冲刺
- * 与自选功能。SHIFT 副功能设计先记在这：7→π、8→∠、9→i、4→e、5→log、6→ln、
- * *→x^y、÷→√、1→sin、2→cos、3→tan、FMT→ANS，待求值器支持后再接。
- * DEL（T13）暂与 BACK 同做退格，若要区分语义改这里即可。 */
+ * 已启用：数字 / 小数点 / * ÷ + - / 括号 / AC / 撤销(BACK) / 删除(DEL) / 求值(EXE)；
+ * SHIFT 已接为"修饰状态键"（按下后第二行提示 SHIFT ACTIVE，第一行保持当前内容）。
+ * 预留未启用（0xFF）：MODE、方向键、OK、x10^x、FMT(ANS)——属任务 5 冲刺与自选功能。
+ * SHIFT 副功能设计先记在这：7→π、8→∠、9→i、4→e、5→log、6→ln、*→x^y、÷→√、
+ * 1→sin、2→cos、3→tan、FMT→ANS，待求值器支持后再接。 */
 #define APP_CH_AC    0x01U   /* AC：全清 */
-#define APP_CH_BACK  0x08U   /* BACK：退格 */
+#define APP_CH_UNDO  0x08U   /* BACK：撤销（回滚到上一编辑步骤，深度 8） */
+#define APP_CH_DEL   0x7FU   /* DEL：删除最后一个字符 */
 #define APP_CH_EQ    0x0DU   /* =：求值（EXE 键） */
+#define APP_CH_SHIFT 0x02U   /* SHIFT：修饰状态键（副功能待 D7 接入） */
 
 static const uint8_t s_key_map[30] =
 {
-  /* T0      T1          T2     T3     T4     T5     T6     T7     T8     T9    */
-    0xFFU,  APP_CH_BACK, 0xFFU, 0xFFU, 0xFFU, '(',   ')',   0xFFU, 0xFFU, 0xFFU,
-  /* T10    T11    T12    T13         T14        T15    T16    T17    T18    T19 */
-    '7',   '8',   '9',   APP_CH_BACK, APP_CH_AC, '4',   '5',   '6',   '*',   '/',
+  /* T0          T1          T2     T3     T4     T5     T6     T7     T8     T9    */
+    APP_CH_SHIFT, APP_CH_UNDO, 0xFFU, 0xFFU, 0xFFU, '(',   ')',   0xFFU, 0xFFU, 0xFFU,
+  /* T10    T11    T12    T13        T14        T15    T16    T17    T18    T19 */
+    '7',   '8',   '9',   APP_CH_DEL, APP_CH_AC, '4',   '5',   '6',   '*',   '/',
   /* T20    T21    T22    T23    T24    T25    T26    T27    T28    T29 */
     '1',   '2',   '3',   '+',   '-',   '0',   '.',   0xFFU, 0xFFU, APP_CH_EQ,
 };
@@ -268,11 +270,59 @@ static const uint8_t s_key_map[30] =
 static char    s_expr[32];       /* 输入的表达式（C 字符串） */
 static uint8_t s_expr_len;
 static uint8_t s_just_eval;      /* 刚按过 = ：下一次按数字要开新算式 */
+static uint8_t s_shift_active;   /* SHIFT 修饰态：下一次按键消费掉它（副功能待 D7） */
+
+/* 撤销栈（BACK 键）：每次"将要改变表达式"的按键前，把当前表达式快照压栈；
+ * BACK 弹栈恢复 = 逐步回滚编辑历史。满栈丢最旧的，保留最近 APP_UNDO_DEPTH 步。 */
+#define APP_UNDO_DEPTH 8U
+static char    s_undo[APP_UNDO_DEPTH][32];
+static uint8_t s_undo_len[APP_UNDO_DEPTH];
+static uint8_t s_undo_count;
+
+/* 压入当前表达式快照（含结尾 '\0'） */
+static void app_undo_push(void)
+{
+  if (s_undo_count >= APP_UNDO_DEPTH)      /* 满：整体左移，丢最旧一层 */
+  {
+    for (uint8_t i = 0U; (i + 1U) < APP_UNDO_DEPTH; i++)
+    {
+      for (uint8_t k = 0U; k <= s_undo_len[i + 1U]; k++)
+      {
+        s_undo[i][k] = s_undo[i + 1U][k];
+      }
+      s_undo_len[i] = s_undo_len[i + 1U];
+    }
+    s_undo_count = APP_UNDO_DEPTH - 1U;
+  }
+  for (uint8_t k = 0U; k <= s_expr_len; k++)
+  {
+    s_undo[s_undo_count][k] = s_expr[k];
+  }
+  s_undo_len[s_undo_count] = s_expr_len;
+  s_undo_count++;
+}
+
+/* 弹栈恢复；栈空返回 0（无可回滚） */
+static uint8_t app_undo_pop(void)
+{
+  if (s_undo_count == 0U)
+  {
+    return 0U;
+  }
+  s_undo_count--;
+  s_expr_len = s_undo_len[s_undo_count];
+  for (uint8_t k = 0U; k <= s_expr_len; k++)
+  {
+    s_expr[k] = s_undo[s_undo_count][k];
+  }
+  return 1U;
+}
 
 static void app_calc_evaluate(void);   /* 前置声明：app_calc_input 的求值分支要调用它 */
 
-/* 显示表达式：超过 16 字符时显示"末尾 15 字符"，最左边放 '>' 提示被截断 */
-static void app_calc_show(void)
+/* 显示表达式（第二行提示文字由调用者给出）：
+ * 超过 16 字符时显示"末尾 15 字符"，最左边放 '>' 提示被截断 */
+static void app_calc_show_hint(const char *hint)
 {
   char    t[17];
   uint8_t start;
@@ -280,7 +330,7 @@ static void app_calc_show(void)
 
   if (s_expr_len == 0U)
   {
-    app_display("0", "ready");       /* 主界面空闲态 */
+    app_display("0", hint);          /* 第一行"0" + 调用者的提示文字 */
     return;
   }
 
@@ -295,15 +345,67 @@ static void app_calc_show(void)
   }
   t[j] = '\0';
 
-  app_display(t, "= to eval");
+  app_display(t, hint);
+}
+
+/* 主界面空闲态的花样提示（每次进入空闲态时随机选一条） */
+static const char *const s_fun_hints[] =
+{
+  "Hi! (^_^)",
+  "I'm awake! :D",
+  "Awaiting input_",
+  "Hello, world! :)",
+  "Let's do math! >",
+  "Go Go Go! >_<",
+};
+#define APP_FUN_HINT_COUNT (sizeof(s_fun_hints) / sizeof(s_fun_hints[0]))
+
+static uint32_t s_fun_seed;      /* 随机种子：0 = 还没初始化（首次用 tick 垫入） */
+
+/* 返回一条随机彩蛋提示（xorshift32——短小够用，不当密码学随机用） */
+static const char *app_fun_hint(void)
+{
+  if (s_fun_seed == 0U)
+  {
+    s_fun_seed = osKernelGetTickCount() | 1U;   /* 非零种子；xorshift 从非零出发永不为 0 */
+  }
+  s_fun_seed ^= (s_fun_seed << 13);
+  s_fun_seed ^= (s_fun_seed >> 17);
+  s_fun_seed ^= (s_fun_seed << 5);
+  return s_fun_hints[s_fun_seed % (uint32_t)APP_FUN_HINT_COUNT];
+}
+
+/* 常规刷新：第二行提示按状态自动选（空闲随机彩蛋 / 输入中 EXE to evaluate） */
+static void app_calc_show(void)
+{
+  app_calc_show_hint((s_expr_len == 0U) ? app_fun_hint() : "EXE to evaluate");
 }
 
 /* 所有输入（触摸键、以后想加的串口命令）都从这里进 */
 static void app_calc_input(uint8_t c)
 {
-  /* 1) AC 全清 */
+  /* SHIFT 是一次性修饰键：它之后的第一个按键就把它消费掉（副功能待 D7 接入）。
+   * 先消费再处理本次按键——本次按键若还是 SHIFT，会在下面重新激活。 */
+  if (s_shift_active != 0U)
+  {
+    s_shift_active = 0U;
+  }
+
+  /* 0) SHIFT：进入修饰态——第一行保持当前表达式，第二行提示状态 */
+  if (c == APP_CH_SHIFT)
+  {
+    s_shift_active = 1U;
+    app_calc_show_hint("SHIFT ACTIVE");
+    return;
+  }
+
+  /* 1) AC 全清（清之前记撤销点，BACK 可恢复到清空前） */
   if (c == APP_CH_AC)
   {
+    if (s_expr_len > 0U)
+    {
+      app_undo_push();
+    }
     s_expr_len = 0U;
     s_expr[0] = '\0';
     s_just_eval = 0U;
@@ -311,11 +413,23 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 2) 退格：删掉最后一个字符（空了就不动） */
-  if (c == APP_CH_BACK)
+  /* 2) BACK：撤销——回滚到上一编辑步骤（栈空则无反应） */
+  if (c == APP_CH_UNDO)
+  {
+    if (app_undo_pop() != 0U)
+    {
+      s_just_eval = 0U;                /* 回滚后的状态不再是"刚求值" */
+      app_calc_show();
+    }
+    return;
+  }
+
+  /* 3) DEL：删除最后一个字符（删之前记撤销点；空了就不动） */
+  if (c == APP_CH_DEL)
   {
     if (s_expr_len > 0U)
     {
+      app_undo_push();
       s_expr_len--;
       s_expr[s_expr_len] = '\0';
     }
@@ -323,14 +437,17 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 3) = 求值（D6 实现；现在无反应） */
+  /* 4) = 求值（求值成功时由 app_calc_evaluate 记撤销点并回填） */
   if (c == APP_CH_EQ)
   {
     app_calc_evaluate();
     return;
   }
 
-  /* 4) 刚求过值（= 后）的状态机：
+  /* 5) 下面要动表达式了：先记撤销点 */
+  app_undo_push();
+
+  /* 6) 刚求过值（= 后）的状态机：
    *    按数字/小数点 → 清空、开新算式；
    *    按运算符     → 保留结果字符串，在它上面继续算；
    *    两种情况都离开"刚求值"状态——否则后续数字会被误当成新算式清掉。 */
@@ -344,7 +461,7 @@ static void app_calc_input(uint8_t c)
     s_just_eval = 0U;
   }
 
-  /* 5) 追加字符（给 '\0' 留一个位置） */
+  /* 7) 追加字符（给 '\0' 留一个位置） */
   if (s_expr_len < (uint8_t)(sizeof(s_expr) - 1U))
   {
     s_expr[s_expr_len] = (char)c;
@@ -352,7 +469,7 @@ static void app_calc_input(uint8_t c)
     s_expr[s_expr_len] = '\0';
   }
 
-  /* 6) 刷新显示 */
+  /* 8) 刷新显示 */
   app_calc_show();
 }
 
@@ -435,6 +552,7 @@ static void app_calc_evaluate(void)
 
   if (st == CALC_OK)
   {
+    app_undo_push();      /* 记撤销点：按 BACK 可回到求值前的表达式 */
     app_format_float(res.real, r, (uint8_t)sizeof(r));
     rlen = app_len16(r);
 
@@ -455,7 +573,7 @@ static void app_calc_evaluate(void)
     s_expr_len = rlen;
     s_just_eval = 1U;
 
-    app_display(line1, "C=back  AC=clear");
+    app_display(line1, "BACK=undo AC=clr");
   }
   else if (st == CALC_DIV_ZERO)
   {
