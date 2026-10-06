@@ -6,36 +6,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 这是 Comsen 实验室硬件组**招新题目**的分发仓库，不是产品代码库。核心事实：
 
-- `example/` 里能看到的只是 STM32CubeMX 生成的骨架（初始化、任务创建、GPIO/TIM 配置）。
-- **计算器、LCD、触摸这些模块的实现全部以预编译静态库形式提供**，位于 `example/lib/*.a`，源码不在此仓库。不要试图从 `Core/Src/main.c` 反推计算器行为——那里没有。
-- 参赛者的任务是逐模块替换：自己实现某个模块后，从 `example/CMakeLists.txt` 的链接列表中删掉对应 `.a`，加入自己的 `.c`。**不要同时保留同名实现与原库**。
+- `mycalc/` 里能看到的只是 STM32CubeMX 生成的骨架（初始化、任务创建、GPIO/TIM 配置）。
+- **计算器、LCD、触摸这些模块的实现全部以预编译静态库形式提供**，位于 `mycalc/lib/*.a`，源码不在此仓库。不要试图从 `Core/Src/main.c` 反推计算器行为——那里没有。
+- 参赛者的任务是逐模块替换：自己实现某个模块后，从 `mycalc/CMakeLists.txt` 的链接列表中删掉对应 `.a`，加入自己的 `.c`。**不要同时保留同名实现与原库**。
 - 仓库文档与代码注释均使用中文。
 
 本目录已被 git 跟踪（最新状态以 `git status` 为准），git 仓库根是 `E:/myproject`（个人嵌入式项目合集）。在此处的 commit 会落到那个合集仓库里，操作前先确认范围。
 
 ### 文档与标准
 
-- 根目录 `README.md` 是招新题目与要求的**唯一标准文档：只读，不允许修改**；`example/README.md` 为示例说明，同样只读。修订其它任何文档时必须与 README 保持一致。
+- 根目录 `README.md` 是招新题目与要求的**唯一标准文档：只读，不允许修改**；`mycalc/README.md` 为示例说明，同样只读。修订其它任何文档时必须与 README 保持一致。
 - 参与者的工作文档都在 `学习知识/` 目录：《七天学习计划.md》（七天执行手册）、《函数清单.md》（自定义函数总表）、《项目结构图.md》（文件地图与调用关系图），以及《阶段二.md》~《阶段六.md》（各阶段基础知识讲解：含 STM32/FreeRTOS/计算器基础原理与拓展知识，写作体例为"专业说法 + 大白话解释"，内容已按本工程实际接口核对过）；可随进度维护。
-- 本副本的参与路线（已选定）：保留示例的 FreeRTOS 五任务架构，按 README 规则做**同名替换**（用户的明确要求，不要单文件自定义架构）——`example/User/calculator_app.c`↔libcalculator_app.a、`User/touch_filter.c`↔libtouch_filter.a、`User/calculator_engine.c`↔libcalculator_engine.a（liblcd1602/libtp229 继续用库）；先完成任务 2/3/4、冲刺任务 5；执行细节以《七天学习计划.md》为准。
+- 本副本的参与路线（已选定）：保留示例的 FreeRTOS 五任务架构，按 README 规则做**同名替换**（用户的明确要求，不要单文件自定义架构）——`mycalc/User/calculator_app.c`↔libcalculator_app.a、`User/touch_filter.c`↔libtouch_filter.a、`User/calculator_engine.c`↔libcalculator_engine.a（liblcd1602/libtp229 继续用库）；先完成任务 2/3/4、冲刺任务 5；执行细节以《七天学习计划.md》为准。
 - README 最新「## 提交」章（2026-10-04 更新）要求：提交 = ①演示视频（1~3 分钟）②完整可编译工程 + 工程自己的 README.md ③`REPORT.md`。**`REPORT.md` 必须由用户本人手写，严禁 AI 代写**（README 原文：AI 生成内容"视同无效提交并取消资格"）；其余开发与调试过程 README 鼓励 AI 辅助。提交渠道：fork 仓库 QQ 发地址 / 压缩包 QQ 私发（≤100MB，命名 `Comsen招新-硬件组-[年级]-[姓名]`）。
 
 ## 构建
 
-**上游 README 描述的 `./build.sh` + `toolchain/env.sh` 流程在本副本中不可用**——`setup.sh`、`toolchain/` 目录不存在，`example/build.sh` 亦已移除（均属 Linux/WSL 发布包的一部分）。在 Windows 上直接走 CMake + Ninja（已实测可用）：
+**上游 README 描述的 `./build.sh` + `toolchain/env.sh` 流程在本副本中不可用**——`setup.sh`、`toolchain/` 目录不存在（均属 Linux/WSL 发布包的一部分）。在 Windows 上直接走 CMake + Ninja（已实测可用）；工程自带 `mycalc/build.sh` / `mycalc/build.bat` 一键脚本，内部就是下面的命令：
 
 ```bash
 # cmake/ninja 不在系统 PATH，用 STM32CubeCLT 的 bundle；arm-none-eabi-gcc 已在 PATH 中
 export PATH="/c/Users/lyh35/AppData/Local/stm32cube/bundles/cmake/4.3.1+st.1/bin:/c/Users/lyh35/AppData/Local/stm32cube/bundles/ninja/1.13.2+st.1/bin:$PATH"
 
-cmake -S example -B example/build/Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build example/build/Debug
+cmake -S mycalc -B mycalc/build/Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build mycalc/build/Debug
 ```
 
 - 编译器：`D:\Arm\GNU Toolchain mingw-w64-i686-arm-none-eabi\bin\arm-none-eabi-gcc.exe`（Arm GNU Toolchain 15.3.1，已在 PATH）。`lib/*.a` 由 Arm GNU Toolchain 15.2 构建，ABI 兼容。
-- 产物：`example/build/<Config>/software.elf`、`.hex`、`.bin`、`.map`（hex/bin 由 `CMakeLists.txt` 的 POST_BUILD 生成）。
+- 产物：`mycalc/build/<Config>/software.elf`、`.hex`、`.bin`、`.map`（hex/bin 由 `CMakeLists.txt` 的 POST_BUILD 生成）。
 - 实测占用（`arm-none-eabi-size`，2026-10-04）：Debug FLASH 44236 B (67.5%) / RAM 13192 B (64.4%)；Release FLASH 39848 B (60.8%) / RAM 13184 B (64.4%)。**Flash 只有 64 KiB，余量不多。**
-- 用 CubeMX 打开 `example/software.ioc` 可查看或重新生成配置。
+- 用 CubeMX 打开 `mycalc/software.ioc` 可查看或重新生成配置。
 
 ## 无自动化测试
 
@@ -81,7 +81,7 @@ CMSIS-RTOS v2 接口，**全部静态分配**：5 个任务的栈和 TCB 都是 
 
 `lcd1602_write_lines`/`lcd1602_write_frame` 接收的是**定长 16 字符**的行缓冲（两行 ×16 字符的字符屏）。`touch_filter_t`、`touch_model_t` 的结构体定义是公开的，可直接在栈上或静态分配。
 
-引脚分配：`example/software.ioc` 和 `main.c` 的 `MX_GPIO_Init()`（PB6、PB8、PB10–PB15 推挽输出，PB7、PB9 输入，PC13 输出）。**2026-10-06 已用仓库根 `原理图.png` + 库反汇编双向核实**：LCD1602 经 H3 插座——PB10=RS、PB11=E、PB12–PB15=D4–D7，RW 未接（恒定写模式）；两片 TTP229——U1 片 SCL=PB6 / SDO=PB7、U2 片 SCL=PB8 / SDO=PB9（两片分别管 T0–T14 与 T15–T29 一带，共 30 键）。TTP229 用的是 GPIO 模拟两线时序，不是硬件 I²C 外设。
+引脚分配：`mycalc/software.ioc` 和 `main.c` 的 `MX_GPIO_Init()`（PB6、PB8、PB10–PB15 推挽输出，PB7、PB9 输入，PC13 输出）。**2026-10-06 已用仓库根 `原理图.png` + 库反汇编双向核实**：LCD1602 经 H3 插座——PB10=RS、PB11=E、PB12–PB15=D4–D7，RW 未接（恒定写模式）；两片 TTP229——U1 片 SCL=PB6 / SDO=PB7、U2 片 SCL=PB8 / SDO=PB9（两片分别管 T0–T14 与 T15–T29 一带，共 30 键）。TTP229 用的是 GPIO 模拟两线时序，不是硬件 I²C 外设。
 
 ## 重新生成 CubeMX 时不要丢的东西
 
