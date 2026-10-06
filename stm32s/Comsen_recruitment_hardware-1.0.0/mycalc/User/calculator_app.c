@@ -261,10 +261,11 @@ static void app_usb_poll(void)
  *   行6   T25 0        T26 .         T27 x10^x    T28 FMT(ANS)  T29 EXE
  *
  * 已启用：数字 / 小数点 / * ÷ + - / 括号 / AC / 撤销(BACK) / 删除(DEL) / 求值(EXE)；
- * MODE = 设置菜单（COMP/CMPLX、DEG/RAD 全局设置）；x10^x(T27) = 科学计数记号的 'E'；
+ * MODE = 设置菜单（COMP/CMPLX、DEG/RAD 全局设置，OK 确认退出）；x10^x(T27) = 科学计数记号的 'E'；
  * SHIFT = 修饰状态键：按后下一键出副功能（见 app_shift_alt）——7→π、4→e、5→log(、
  * 6→ln(、1→sin(、2→cos(、3→tan(、÷→sqrt(；8→∠、9→i、*→x^y 属复数/幂运算，暂未支持。
- * FMT(T28) = 显示精度切换（2 / 4 / 6 位小数）；方向键 = 编辑光标移动；预留未启用（0xFF）：OK。 */
+ * FMT(T28) = 显示精度切换（2 / 4 / 6 位小数）；方向键 = 编辑光标移动；
+ * OK(T4) = MODE 菜单的确认/退出键（仅菜单内有效，菜单外按下无动作）。 */
 #define APP_CH_AC    0x01U   /* AC：全清 */
 #define APP_CH_UNDO  0x08U   /* BACK：撤销（式子粒度回滚，深度 8） */
 #define APP_CH_DEL   0x7FU   /* DEL：删除光标左侧一个字符 */
@@ -276,11 +277,12 @@ static void app_usb_poll(void)
 #define APP_CH_DOWN  0x12U   /* ↓：光标下移一行（+16 字符） */
 #define APP_CH_LEFT  0x13U   /* ←：光标左移一字符 */
 #define APP_CH_RIGHT 0x14U   /* →：光标右移一字符 */
+#define APP_CH_OK    0x15U   /* OK：MODE 菜单的确认/退出键（仅菜单内有效） */
 
 static const uint8_t s_key_map[30] =
 {
   /* T0          T1          T2          T3        T4     T5     T6     T7         T8         T9          */
-    APP_CH_SHIFT, APP_CH_UNDO, APP_CH_MODE, APP_CH_UP, 0xFFU, '(',  ')',  APP_CH_LEFT, APP_CH_DOWN, APP_CH_RIGHT,
+    APP_CH_SHIFT, APP_CH_UNDO, APP_CH_MODE, APP_CH_UP, APP_CH_OK, '(',  ')',  APP_CH_LEFT, APP_CH_DOWN, APP_CH_RIGHT,
   /* T10    T11    T12    T13        T14        T15    T16    T17    T18    T19 */
     '7',   '8',   '9',   APP_CH_DEL, APP_CH_AC, '4',   '5',   '6',   '*',   '/',
   /* T20    T21    T22    T23    T24    T25    T26    T27    T28    T29 */
@@ -374,14 +376,15 @@ static const char *app_shift_alt(uint8_t c)
   }
 }
 
-/* MODE 设置菜单：第一行是菜单项，第二行显示当前两项设置。
- * 菜单态下：按 1 切换 COMP/CMPLX，按 2 切换 DEG/RAD，其它键退出。 */
+/* MODE 设置菜单：第一行是菜单项，第二行显示当前两项设置 + "[OK]"退出提示。
+ * 菜单态下：按 1 切换 COMP/CMPLX，按 2 切换 DEG/RAD，按 OK 确认退出；其它键无反应。 */
 static void app_mode_menu_show(void)
 {
   char t[17];
   uint8_t j = 0U;
   const char *m = (s_cmplx_mode != 0U) ? "CMPLX" : "COMP";
   const char *a = (s_angle_rad != 0U) ? "RAD" : "DEG";
+  const char *o = " [OK]";
 
   for (uint8_t i = 0U; m[i] != '\0'; i++)
   {
@@ -391,6 +394,10 @@ static void app_mode_menu_show(void)
   for (uint8_t i = 0U; a[i] != '\0'; i++)
   {
     t[j++] = a[i];
+  }
+  for (uint8_t i = 0U; o[i] != '\0'; i++)
+  {
+    t[j++] = o[i];
   }
   t[j] = '\0';
 
@@ -506,7 +513,8 @@ static void app_calc_put_str(const char *s)
 /* 所有输入（触摸键、以后想加的串口命令）都从这里进 */
 static void app_calc_input(uint8_t c)
 {
-  /* 0) MODE 菜单态：按 1 / 2 切换设置，其它键退出菜单（该键不执行） */
+  /* 0) MODE 菜单态：按 1 / 2 切换设置（改完留在菜单里继续调），按 OK 确认退出；
+   *    其它键一律无反应——退出只能走 OK（再按 MODE 也不退出），防误触。 */
   if (s_mode_menu != 0U)
   {
     if (c == '1')
@@ -519,11 +527,18 @@ static void app_calc_input(uint8_t c)
       s_angle_rad ^= 1U;
       app_mode_menu_show();
     }
-    else
+    else if (c == APP_CH_OK)
     {
-      s_mode_menu = 0U;              /* 含再按 MODE：退出菜单 */
+      s_mode_menu = 0U;
       app_calc_show();
     }
+    return;
+  }
+
+  /* 0.5) OK：MODE 菜单的确认键；菜单外按下不产生任何动作。
+   *      刻意放在 SHIFT 消费之前——SHIFT+OK 不吞 SHIFT 修饰态（OK 视为不存在）。 */
+  if (c == APP_CH_OK)
+  {
     return;
   }
 

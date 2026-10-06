@@ -1,12 +1,13 @@
 # 嵌入式自制项目合集
 
-> 一个存放 Arduino / ESP32 / STM32 等自制嵌入式小项目的仓库。
+> 一个存放自制嵌入式小项目与相关练题材料的仓库：Arduino / STM32 为主，另收算法练题。
 
 ![status](https://img.shields.io/badge/status-持续更新中-brightgreen)
-![platform](https://img.shields.io/badge/platform-Arduino%20%7C%20ESP32%20%7C%20STM32-blue)
+![platform](https://img.shields.io/badge/platform-Arduino%20%7C%20STM32%20%7C%20Python-blue)
 ![license](https://img.shields.io/badge/license-MIT-yellow)
 
-这里会陆续收录我折腾的嵌入式项目。每个项目放在独立目录中，包含源码、文档、接线说明和踩坑记录。一方面方便自己回顾，另一方面也希望能给同好一些参考。
+仓库按**平台分大目录**：`arduino/`、`stm32s/`、`algorithm/`，每个项目放在对应大目录下，
+包含源码、文档、接线说明和踩坑记录。一方面方便自己回顾，另一方面也希望能给同好一些参考。
 
 ## 目录
 
@@ -31,60 +32,80 @@
 
 ## 项目列表
 
-### 1. VibePet —— AI 编程助手物理状态显示与审批终端
+### arduino/ —— Arduino / AVR 平台
 
-把 AI 编程助手的工作状态搬到桌面上。通过蓝牙连接电脑，在 1.77 英寸屏幕上实时显示 Claude Code 的运行状态；当 AI 需要批准敏感操作时，设备响一声、弹出审批卡，按一下物理按钮就能批准或拒绝——不用切窗口，不用敲键盘。
+#### VibePet —— AI 编程助手物理状态显示与审批终端
+
+把 AI 编程助手（Claude Code）的工作状态搬到桌面上：设备用一根 USB 线连接电脑，
+在 1.77 英寸屏幕上实时显示 AI 的运行状态；当 AI 需要批准敏感操作时，设备响一声、
+弹出审批卡，按一下物理按钮就能批准或拒绝——不用切窗口，不用敲键盘。
 
 | 项目 | 说明 |
 |---|---|
-| 平台 | ESP32-C3 SuperMini |
+| 平台 | Arduino UNO R3（v3.0 起改为 USB 有线；v2.0 的 BLE 无线方案已放弃） |
 | 外设 | 1.77" ST7735S TFT（128×160）、双微动按钮、无源蜂鸣器、状态 LED |
-| 通信 | BLE（Nordic UART Service）+ JSON Lines |
-| 电脑端 | Python 3.9+，仅依赖 `bleak` |
-| 目录 | [`vibepet/`](./vibepet) |
-| 状态 | 电脑端已实现并通过 27 项测试；固件编译通过（Flash 占用 48%），尚未在真实硬件上验证 |
-| 详细说明 | [vibepet/README.md](./vibepet/README.md) |
+| 电脑端 | Python 3.9+，仅依赖 `pyserial` |
+| 目录 | [`arduino/vibepet/`](./arduino/vibepet) |
+| 状态 | 固件已烧录真机、正在联调；电脑端测试 44 例、协议内核离线测试 55 例全部通过 |
+| 详细说明 | [arduino/vibepet/README.md](./arduino/vibepet/README.md) |
 
 屏幕上的六种状态：`IDLE`（空闲）、`WORKING`（工作中）、`APPROVE?`（等待审批）、`DONE`（完成）、`ERROR`（出错）、`LOST`（连接断开，设备自行判定）。
+
+### stm32s/ —— STM32 平台
+
+#### STM32 计算器（Comsen 实验室硬件组招新题）
+
+基于 STM32F103C8T6 的实际可用计算器：1602 字符屏 + 两片 TTP229 共 30 个触摸按键。
+保留示例工程的 FreeRTOS 五任务架构，按"同名替换"规则自行实现了应用层、按键滤波与
+表达式求值器三个模块。支持 USB 串口显示、触摸按键、四则运算、括号与函数、复数运算、
+编辑光标、MODE 设置菜单等功能。
+
+| 项目 | 说明 |
+|---|---|
+| 平台 | STM32F103C8T6（Cortex-M3，64 KiB Flash） |
+| 外设 | 1602 LCD（2 行 × 16 字符）、TTP229 触摸键 ×30、USB CDC |
+| 目录 | [`stm32s/Comsen_recruitment_hardware-1.0.0/`](./stm32s/Comsen_recruitment_hardware-1.0.0) |
+| 状态 | 功能开发完成、已上板整机验收；提交材料整理中 |
+| 详细说明 | [mycalc/README.md](./stm32s/Comsen_recruitment_hardware-1.0.0/mycalc/README.md)（工程说明与编译方法） |
+
+#### demo —— STM32 环境验证小工程
+
+早期验证 CubeMX + CMake 工具链与"编译 → 烧录 → 点亮"闭环的最小工程（点灯级别），
+保留作参考。
+
+### algorithm/ —— 算法练题
+
+ComSen 算法组招新题（task1~4，含 OpenCV、PyTorch 练题）的题目素材与自整理的学习指南，
+按题号整理在 `problem/` 下。
 
 *更多项目正在路上……*
 
 ## 仓库结构
+
+```text
 myproject/
-
-├── vibepet/ # 项目一：AI 编程助手物理终端
-
-│ ├── firmware/ # ESP32 固件
-
-│ │ ├── VibePet/
-
-│ │ │ └── VibePet.ino
-
-│ │ └── TFT_eSPI_User_Setup.h
-
-│ ├── pc/ # 电脑端 Python 程序
-
-│ │ ├── hook_client.py
-
-│ │ ├── bridge_daemon.py
-
-│ │ └── _smoke_test*.py
-
-│ ├── .claude/ # Claude Code Hook 配置
-
-│ └── README.md # 项目详细说明
+├── README.md                  # 本文件
+├── LICENSE                    # MIT 许可证
 │
-├── [下一个项目]/ # 每个项目一个独立目录
-
-│ ├── firmware/ 或 src/
-
-│ ├── docs/
-
-│ └── README.md
-
+├── arduino/                   # Arduino / AVR 平台项目
+│   └── vibepet/               # AI 编程助手物理状态显示与审批终端（v3.0）
+│       ├── firmware/          # UNO 固件
+│       ├── pc/                # 电脑端 Python 程序
+│       ├── tools/             # 字库生成、串口探针等
+│       └── README.md          # 项目详细说明
 │
-
-└── README.md # 本文件
+├── stm32s/                    # STM32 平台项目
+│   ├── demo/                  # 工具链验证小工程
+│   └── Comsen_recruitment_hardware-1.0.0/   # 硬件组招新 · STM32 计算器
+│       ├── mycalc/            # 计算器工程本体（含工程 README）
+│       ├── 学习知识/          # 学习文档、测试清单
+│       └── README.md          # 招新题目原文
+│
+└── algorithm/                 # 算法组招新题材料与学习指南
+    ├── problem/               # 题目素材（按 task 分目录）
+    ├── LEARNING_GUIDE.md      # 学习指南
+    └── README.md              # 题目原文（task1~4）
+```
 
 ## 开发环境
 
@@ -92,9 +113,9 @@ myproject/
 
 | 平台 | 工具链 | 备注 |
 |---|---|---|
-| Arduino | Arduino IDE / arduino-cli | 简单项目首选，库生态丰富 |
-| ESP32 | Arduino IDE（ESP32 板支持）/ PlatformIO | 涉及 BLE、WiFi、FreeRTOS 时用 PlatformIO 更顺手 |
-| STM32 | STM32CubeIDE / Keil / PlatformIO | 需要 HAL 库或寄存器操作 |
+| Arduino / AVR | Arduino IDE / arduino-cli | VibePet 使用；固件里用 Adafruit GFX + ST7735 库 |
+| STM32 | CMake + Ninja + arm-none-eabi-gcc（STM32CubeCLT） | 计算器与 demo；可用 CubeMX 打开 `.ioc` 查看配置 |
+| PC 端 / 算法 | Python 3 + PyTorch / OpenCV | 按各项目 README 的依赖说明安装 |
 
 每个项目的 README 会写明它自己需要哪些工具链、哪些库、以及具体的版本要求。**不要假设所有项目环境一致**。
 
@@ -113,15 +134,18 @@ myproject/
 
 **目录命名**
 
-- 避免空格和中文，避免与已有项目重名；
-- 每个项目一个顶层目录，不嵌套在其他项目里。
+- **顶层按平台分大目录**（如 `arduino/`、`stm32s/`），具体项目放在大目录下，一个项目一个目录；
+- 目录名避免空格和中文，避免与已有项目重名；
 
 **每个项目目录至少包含**
+
+```text
 项目名/
-├── README.md # 必需：硬件清单、接线、依赖、烧录、用法、常见问题
-├── firmware/ 或 src/ # 固件 / 源码
-├── docs/ # 可选：原理图、接线图、设计文档、照片
-└── LICENSE # 可选：如与仓库整体许可不同，单独声明
+├── README.md          # 必需：硬件清单、接线、依赖、烧录、用法、常见问题
+├── firmware/ 或 src/  # 固件 / 源码
+├── docs/              # 可选：原理图、接线图、设计文档、照片
+└── LICENSE            # 可选：如与仓库整体许可不同，单独声明
+```
 
 **README 建议包含**
 
@@ -156,7 +180,7 @@ myproject/
 ## 联系
 
 - GitHub: [@zenith8366](https://github.com/zenith8366)
-- Email:lyh351608807@outlook.com or ericalaplce8@gmail.com
+- Email: lyh351608807@outlook.com or ericalaplce8@gmail.com
 - 有问题优先提 Issue，方便其他人也能看到答案。
 
 ---
