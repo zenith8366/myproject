@@ -27,14 +27,37 @@ void touch_filter_init(touch_filter_t *filter)
 /* 每 10ms 调用一次。D4 目标：返回"当前稳定按着的单个键位"，没有则返回 0 */
 uint32_t touch_filter_update(touch_filter_t *filter, uint32_t raw_bitmap)
 {
-  /* TODO(你写)（D4 雏形）：
-   * 第 1 步 逐位计数 i = 0..29：
-   *     raw 这一位置 1 → counters[i] 加一（到 KEY_STABLE_SAMPLES 封顶）；
-   *     否则 → counters[i] 清零；
-   * 第 2 步 合成 stable_bitmap：把计数达标的位都置进去；
-   * 第 3 步 返回：stable_bitmap == 0 → 返回 0；
-   *     否则返回"编号最小"的那一位（1UL << __builtin_ctz(stable_bitmap)）。 */
-  (void)filter;
-  (void)raw_bitmap;
-  return 0U;
+  uint32_t stable = 0U;
+
+  /* 第 1+2 步：逐位计数并合成 stable_bitmap。
+   * 本函数每 10ms 调一次：同一位连续 KEY_STABLE_SAMPLES 次读到 1 才认定"稳定按下"
+   * （3 次 × 10ms = 30ms 去抖）；中途读到 0 就清零重新数。 */
+  for (uint8_t i = 0U; i < 30U; i++)
+  {
+    if (((raw_bitmap >> i) & 1UL) != 0UL)
+    {
+      if (filter->counters[i] < KEY_STABLE_SAMPLES)
+      {
+        filter->counters[i]++;
+      }
+    }
+    else
+    {
+      filter->counters[i] = 0U;
+    }
+
+    if (filter->counters[i] >= KEY_STABLE_SAMPLES)
+    {
+      stable |= (1UL << i);
+    }
+  }
+  filter->stable_bitmap = stable;
+
+  /* 第 3 步：没有稳定按键 → 返回 0（"无键"）；
+   * 有 → 返回编号最小的那一位（多键同按时以小编号为准，配合试触页的取舍规则）。 */
+  if (stable == 0UL)
+  {
+    return 0UL;
+  }
+  return (uint32_t)(1UL << __builtin_ctz(stable));
 }
