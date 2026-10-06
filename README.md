@@ -51,6 +51,13 @@
 
 屏幕上的六种状态：`IDLE`（空闲）、`WORKING`（工作中）、`APPROVE?`（等待审批）、`DONE`（完成）、`ERROR`（出错）、`LOST`（连接断开，设备自行判定）。
 
+值得注意的是，test-firmwave目录下对于vibepet所需硬件的测试文件也比较有意思，现列出各个测试项目的内容：
+
+- button——最简单的按键控制LED开关
+- esp32wifi——之前vibepet的废案（太菜了没能实现无线传输信息），手机控制LED开关
+- genshin——测试无源蜂鸣器，演奏原神主题曲，hbc都说好
+- tfttest_esp32c3/uno——聘请AI从网上搜索各大主流AI的LOGO显示（试了ChatGPT，DeepSeek，Grok的网页版，结果Grok做出来最终版效果）
+
 ### stm32s/ —— STM32 平台
 
 #### STM32 计算器（Comsen 实验室硬件组招新题）
