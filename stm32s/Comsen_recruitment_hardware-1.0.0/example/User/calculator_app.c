@@ -272,14 +272,20 @@ static uint8_t s_expr_len;
 static uint8_t s_just_eval;      /* 刚按过 = ：下一次按数字要开新算式 */
 static uint8_t s_shift_active;   /* SHIFT 修饰态：下一次按键消费掉它（副功能待 D7） */
 
-/* 撤销栈（BACK 键）：每次"将要改变表达式"的按键前，把当前表达式快照压栈；
- * BACK 弹栈恢复 = 逐步回滚编辑历史。满栈丢最旧的，保留最近 APP_UNDO_DEPTH 步。 */
+/* 撤销栈（BACK 键）：以"式子"为粒度——只在这些时刻记快照：
+ *   ① 从"空 / 刚求值(结果)"状态开始输入第一个字符之前（记下式子起点的状态）；
+ *   ② 按 '=' 求值前（记下整个式子）；
+ *   ③ 按 AC 清空前（记下被清的式子）。
+ * 输入中途的字符不产生快照——所以 BACK 是"整个式子一次回滚"，
+ * 不是退格删字符（删单个字符请用 DEL 键）。
+ * 满栈丢最旧的，保留最近 APP_UNDO_DEPTH 个式子状态。 */
 #define APP_UNDO_DEPTH 8U
 static char    s_undo[APP_UNDO_DEPTH][32];
 static uint8_t s_undo_len[APP_UNDO_DEPTH];
+static uint8_t s_undo_je[APP_UNDO_DEPTH];    /* 快照时的"刚求值"标志 */
 static uint8_t s_undo_count;
 
-/* 压入当前表达式快照（含结尾 '\0'） */
+/* 压入当前表达式快照（含结尾 '\0' 与 just_eval 标志） */
 static void app_undo_push(void)
 {
   if (s_undo_count >= APP_UNDO_DEPTH)      /* 满：整体左移，丢最旧一层 */
@@ -291,6 +297,7 @@ static void app_undo_push(void)
         s_undo[i][k] = s_undo[i + 1U][k];
       }
       s_undo_len[i] = s_undo_len[i + 1U];
+      s_undo_je[i]  = s_undo_je[i + 1U];
     }
     s_undo_count = APP_UNDO_DEPTH - 1U;
   }
@@ -299,10 +306,11 @@ static void app_undo_push(void)
     s_undo[s_undo_count][k] = s_expr[k];
   }
   s_undo_len[s_undo_count] = s_expr_len;
+  s_undo_je[s_undo_count]  = s_just_eval;
   s_undo_count++;
 }
 
-/* 弹栈恢复；栈空返回 0（无可回滚） */
+/* 弹栈恢复（连"刚求值"标志一起还原）；栈空返回 0（无可回滚） */
 static uint8_t app_undo_pop(void)
 {
   if (s_undo_count == 0U)
@@ -315,6 +323,7 @@ static uint8_t app_undo_pop(void)
   {
     s_expr[k] = s_undo[s_undo_count][k];
   }
+  s_just_eval = s_undo_je[s_undo_count];
   return 1U;
 }
 
@@ -413,23 +422,22 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 2) BACK：撤销——回滚到上一编辑步骤（栈空则无反应） */
+  /* 2) BACK：撤销——整个式子回滚到上一个式子状态（栈空则无反应） */
   if (c == APP_CH_UNDO)
   {
-    if (app_undo_pop() != 0U)
+    if (app_undo_pop() != 0U)          /* 连 just_eval 一起还原 */
     {
-      s_just_eval = 0U;                /* 回滚后的状态不再是"刚求值" */
       app_calc_show();
     }
     return;
   }
 
-  /* 3) DEL：删除最后一个字符（删之前记撤销点；空了就不动） */
+  /* 3) DEL：删除最后一个字符（空了就不动）。
+   * DEL 是对当前式子的编辑、不产生撤销点——BACK 只按"式子"粒度回滚。 */
   if (c == APP_CH_DEL)
   {
     if (s_expr_len > 0U)
     {
-      app_undo_push();
       s_expr_len--;
       s_expr[s_expr_len] = '\0';
     }
@@ -444,8 +452,13 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 5) 下面要动表达式了：先记撤销点 */
-  app_undo_push();
+  /* 5) 若本次按键要"开启一段新的输入"（当前为空，或刚求过值），
+   *    先记下式子的起点状态——这是 BACK 的"上一个式子"回滚目标。
+   *    输入中途的字符不记快照（否则 BACK 就退化成按字符删了）。 */
+  if ((s_expr_len == 0U) || (s_just_eval != 0U))
+  {
+    app_undo_push();
+  }
 
   /* 6) 刚求过值（= 后）的状态机：
    *    按数字/小数点 → 清空、开新算式；
