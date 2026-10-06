@@ -247,30 +247,34 @@ static void app_usb_poll(void)
  *   行6   T25 0        T26 .         T27 x10^x    T28 FMT(ANS)  T29 EXE
  *
  * 已启用：数字 / 小数点 / * ÷ + - / 括号 / AC / 撤销(BACK) / 删除(DEL) / 求值(EXE)；
- * SHIFT 已接为"修饰状态键"（按下后第二行提示 SHIFT ACTIVE，第一行保持当前内容）。
- * 预留未启用（0xFF）：MODE、方向键、OK、x10^x、FMT(ANS)——属任务 5 冲刺与自选功能。
- * SHIFT 副功能设计先记在这：7→π、8→∠、9→i、4→e、5→log、6→ln、*→x^y、÷→√、
- * 1→sin、2→cos、3→tan、FMT→ANS，待求值器支持后再接。 */
+ * MODE = 设置菜单（COMP/CMPLX、DEG/RAD 全局设置）；x10^x(T27) = 科学计数记号的 'E'；
+ * SHIFT = 修饰状态键：按后下一键出副功能（见 app_shift_alt）——7→π、4→e、5→log(、
+ * 6→ln(、1→sin(、2→cos(、3→tan(、÷→sqrt(；8→∠、9→i、*→x^y 属复数/幂运算，暂未支持。
+ * 预留未启用（0xFF）：方向键、OK、FMT(ANS)。 */
 #define APP_CH_AC    0x01U   /* AC：全清 */
-#define APP_CH_UNDO  0x08U   /* BACK：撤销（回滚到上一编辑步骤，深度 8） */
+#define APP_CH_UNDO  0x08U   /* BACK：撤销（式子粒度回滚，深度 8） */
 #define APP_CH_DEL   0x7FU   /* DEL：删除最后一个字符 */
 #define APP_CH_EQ    0x0DU   /* =：求值（EXE 键） */
-#define APP_CH_SHIFT 0x02U   /* SHIFT：修饰状态键（副功能待 D7 接入） */
+#define APP_CH_SHIFT 0x02U   /* SHIFT：修饰状态键（副功能见 app_shift_alt） */
+#define APP_CH_MODE  0x04U   /* MODE：设置菜单（COMP/CMPLX、DEG/RAD） */
 
 static const uint8_t s_key_map[30] =
 {
-  /* T0          T1          T2     T3     T4     T5     T6     T7     T8     T9    */
-    APP_CH_SHIFT, APP_CH_UNDO, 0xFFU, 0xFFU, 0xFFU, '(',   ')',   0xFFU, 0xFFU, 0xFFU,
+  /* T0          T1          T2          T3     T4     T5     T6     T7     T8     T9    */
+    APP_CH_SHIFT, APP_CH_UNDO, APP_CH_MODE, 0xFFU, 0xFFU, '(',   ')',   0xFFU, 0xFFU, 0xFFU,
   /* T10    T11    T12    T13        T14        T15    T16    T17    T18    T19 */
     '7',   '8',   '9',   APP_CH_DEL, APP_CH_AC, '4',   '5',   '6',   '*',   '/',
   /* T20    T21    T22    T23    T24    T25    T26    T27    T28    T29 */
-    '1',   '2',   '3',   '+',   '-',   '0',   '.',   0xFFU, 0xFFU, APP_CH_EQ,
+    '1',   '2',   '3',   '+',   '-',   '0',   '.',   'E',   0xFFU, APP_CH_EQ,
 };
 
 static char    s_expr[32];       /* 输入的表达式（C 字符串） */
 static uint8_t s_expr_len;
 static uint8_t s_just_eval;      /* 刚按过 = ：下一次按数字要开新算式 */
-static uint8_t s_shift_active;   /* SHIFT 修饰态：下一次按键消费掉它（副功能待 D7） */
+static uint8_t s_shift_active;   /* SHIFT 修饰态：下一次按键消费掉它 */
+static uint8_t s_cmplx_mode;     /* 计算模式：0=COMP，1=CMPLX（MODE 菜单里切换） */
+static uint8_t s_angle_rad;      /* 角度制：0=DEG（角度），1=RAD（弧度）；全局设置 */
+static uint8_t s_mode_menu;      /* 1 = 正在 MODE 设置菜单里 */
 
 /* 撤销栈（BACK 键）：以"式子"为粒度——只在这些时刻记快照：
  *   ① 从"空 / 刚求值(结果)"状态开始输入第一个字符之前（记下式子起点的状态）；
@@ -328,6 +332,47 @@ static uint8_t app_undo_pop(void)
 }
 
 static void app_calc_evaluate(void);   /* 前置声明：app_calc_input 的求值分支要调用它 */
+
+/* SHIFT 副功能：激活态下按这些"主功能字符键" → 输入功能记号（多字符）而不是主字符。
+ * 返回 NULL = 该键没有副功能（按主功能处理）。 */
+static const char *app_shift_alt(uint8_t c)
+{
+  switch (c)
+  {
+    case '7': return "pi";
+    case '4': return "e";
+    case '5': return "log(";
+    case '6': return "ln(";
+    case '1': return "sin(";
+    case '2': return "cos(";
+    case '3': return "tan(";
+    case '/': return "sqrt(";
+    default:  return NULL;      /* 8→∠、9→i、*→x^y 属复数/幂运算，暂未支持 */
+  }
+}
+
+/* MODE 设置菜单：第一行是菜单项，第二行显示当前两项设置。
+ * 菜单态下：按 1 切换 COMP/CMPLX，按 2 切换 DEG/RAD，其它键退出。 */
+static void app_mode_menu_show(void)
+{
+  char t[17];
+  uint8_t j = 0U;
+  const char *m = (s_cmplx_mode != 0U) ? "CMPLX" : "COMP";
+  const char *a = (s_angle_rad != 0U) ? "RAD" : "DEG";
+
+  for (uint8_t i = 0U; m[i] != '\0'; i++)
+  {
+    t[j++] = m[i];
+  }
+  t[j++] = ' ';
+  for (uint8_t i = 0U; a[i] != '\0'; i++)
+  {
+    t[j++] = a[i];
+  }
+  t[j] = '\0';
+
+  app_display("1:CMPLX 2:ANGLE", t);
+}
 
 /* 显示表达式（第二行提示文字由调用者给出）：
  * 超过 16 字符时显示"末尾 15 字符"，最左边放 '>' 提示被截断 */
@@ -390,17 +435,86 @@ static void app_calc_show(void)
   app_calc_show_hint((s_expr_len == 0U) ? app_fun_hint() : "EXE to evaluate");
 }
 
+/* 向表达式缓冲追加一个字符（单字符与函数序列共用）：
+ *   - 处于"空 / 刚求值"状态时的第一击 = 一段新输入的开始 → 记撤销点；
+ *   - 刚求值状态下：运算符 / E 接着结果写，其它字符开新算式；
+ *   - 满 31 字符后丢弃（给 '\0' 留位）。 */
+static void app_calc_put(uint8_t c)
+{
+  if ((s_expr_len == 0U) || (s_just_eval != 0U))
+  {
+    app_undo_push();
+  }
+
+  if (s_just_eval != 0U)
+  {
+    if (!((c == '+') || (c == '-') || (c == '*') || (c == '/') || (c == 'E')))
+    {
+      s_expr_len = 0U;
+      s_expr[0] = '\0';
+    }
+    s_just_eval = 0U;
+  }
+
+  if (s_expr_len < (uint8_t)(sizeof(s_expr) - 1U))
+  {
+    s_expr[s_expr_len] = (char)c;
+    s_expr_len++;
+    s_expr[s_expr_len] = '\0';
+  }
+}
+
+/* 追加一串字符（函数记号 "sin(" 等），整串算一个输入动作 */
+static void app_calc_put_str(const char *s)
+{
+  for (uint8_t i = 0U; s[i] != '\0'; i++)
+  {
+    app_calc_put((uint8_t)s[i]);
+  }
+}
+
 /* 所有输入（触摸键、以后想加的串口命令）都从这里进 */
 static void app_calc_input(uint8_t c)
 {
-  /* SHIFT 是一次性修饰键：它之后的第一个按键就把它消费掉（副功能待 D7 接入）。
-   * 先消费再处理本次按键——本次按键若还是 SHIFT，会在下面重新激活。 */
-  if (s_shift_active != 0U)
+  /* 0) MODE 菜单态：按 1 / 2 切换设置，其它键退出菜单（该键不执行） */
+  if (s_mode_menu != 0U)
   {
-    s_shift_active = 0U;
+    if (c == '1')
+    {
+      s_cmplx_mode ^= 1U;
+      app_mode_menu_show();
+    }
+    else if (c == '2')
+    {
+      s_angle_rad ^= 1U;
+      app_mode_menu_show();
+    }
+    else
+    {
+      s_mode_menu = 0U;              /* 含再按 MODE：退出菜单 */
+      app_calc_show();
+    }
+    return;
   }
 
-  /* 0) SHIFT：进入修饰态——第一行保持当前表达式，第二行提示状态 */
+  /* 1) SHIFT 是一次性修饰键：它之后的第一个按键就消费它；
+   *    被消费的键若有副功能（app_shift_alt），插入功能记号并结束。 */
+  if (s_shift_active != 0U)
+  {
+    const char *alt;
+
+    s_shift_active = 0U;
+    alt = app_shift_alt(c);
+    if (alt != NULL)
+    {
+      app_calc_put_str(alt);
+      app_calc_show();
+      return;
+    }
+    /* 该键没有副功能：落回下面按主功能处理 */
+  }
+
+  /* 2) SHIFT：进入修饰态——第一行保持当前表达式，第二行提示状态 */
   if (c == APP_CH_SHIFT)
   {
     s_shift_active = 1U;
@@ -408,7 +522,15 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 1) AC 全清（清之前记撤销点，BACK 可恢复到清空前） */
+  /* 3) MODE：进入设置菜单 */
+  if (c == APP_CH_MODE)
+  {
+    s_mode_menu = 1U;
+    app_mode_menu_show();
+    return;
+  }
+
+  /* 4) AC 全清（清之前记撤销点，BACK 可恢复到清空前） */
   if (c == APP_CH_AC)
   {
     if (s_expr_len > 0U)
@@ -422,7 +544,7 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 2) BACK：撤销——整个式子回滚到上一个式子状态（栈空则无反应） */
+  /* 5) BACK：撤销——整个式子回滚到上一个式子状态（栈空则无反应） */
   if (c == APP_CH_UNDO)
   {
     if (app_undo_pop() != 0U)          /* 连 just_eval 一起还原 */
@@ -432,7 +554,7 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 3) DEL：删除最后一个字符（空了就不动）。
+  /* 6) DEL：删除最后一个字符（空了就不动）。
    * DEL 是对当前式子的编辑、不产生撤销点——BACK 只按"式子"粒度回滚。 */
   if (c == APP_CH_DEL)
   {
@@ -445,44 +567,17 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 4) = 求值（求值成功时由 app_calc_evaluate 记撤销点并回填） */
+  /* 7) = 求值（求值成功时由 app_calc_evaluate 记撤销点并回填） */
   if (c == APP_CH_EQ)
   {
     app_calc_evaluate();
     return;
   }
 
-  /* 5) 若本次按键要"开启一段新的输入"（当前为空，或刚求过值），
-   *    先记下式子的起点状态——这是 BACK 的"上一个式子"回滚目标。
-   *    输入中途的字符不记快照（否则 BACK 就退化成按字符删了）。 */
-  if ((s_expr_len == 0U) || (s_just_eval != 0U))
-  {
-    app_undo_push();
-  }
+  /* 8) 追加字符：put 内部负责"新输入段记撤销点"与 just_eval 状态机 */
+  app_calc_put(c);
 
-  /* 6) 刚求过值（= 后）的状态机：
-   *    按数字/小数点 → 清空、开新算式；
-   *    按运算符     → 保留结果字符串，在它上面继续算；
-   *    两种情况都离开"刚求值"状态——否则后续数字会被误当成新算式清掉。 */
-  if (s_just_eval != 0U)
-  {
-    if (((c >= '0') && (c <= '9')) || (c == '.'))
-    {
-      s_expr_len = 0U;
-      s_expr[0] = '\0';
-    }
-    s_just_eval = 0U;
-  }
-
-  /* 7) 追加字符（给 '\0' 留一个位置） */
-  if (s_expr_len < (uint8_t)(sizeof(s_expr) - 1U))
-  {
-    s_expr[s_expr_len] = (char)c;
-    s_expr_len++;
-    s_expr[s_expr_len] = '\0';
-  }
-
-  /* 8) 刷新显示 */
+  /* 9) 刷新显示 */
   app_calc_show();
 }
 
@@ -561,7 +656,11 @@ static void app_calc_evaluate(void)
     return;                              /* 空表达式：当没按过 */
   }
 
-  st = calculator_evaluate(s_expr, CALC_ANGLE_DEG, 0U, (calc_complex_t){0}, &res);
+  st = calculator_evaluate(s_expr,
+                           (s_angle_rad != 0U) ? CALC_ANGLE_RAD : CALC_ANGLE_DEG,
+                           s_cmplx_mode,
+                           (calc_complex_t){0},
+                           &res);
 
   if (st == CALC_OK)
   {

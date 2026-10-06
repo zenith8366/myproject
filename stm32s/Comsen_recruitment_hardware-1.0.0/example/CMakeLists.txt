@@ -77,6 +77,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 #   "${CMAKE_CURRENT_SOURCE_DIR}/lib/libtouch_model.a"   # 从未使用，D5 移除
 
     # Add user defined libraries
+    m    # 数学库：求值器的 sinf/cosf/tanf/log10f/logf/sqrtf
 )
 
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
