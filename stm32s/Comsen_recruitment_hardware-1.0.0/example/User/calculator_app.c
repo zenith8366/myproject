@@ -21,6 +21,8 @@
 #include "usb_device.h"       /* USBD_STATE_CONFIGURED 等 */
 #include "usbd_cdc_if.h"      /* CDC_Transmit_FS / CDC_RxTake */
 #include <string.h>           /* 不用也行，可删 */
+#include "ttp229.h"           /* 物理按键原始读取（继续用库） */
+#include "touch_filter.h"     /* 你的 touch_filter.c 的接口（同名） */
 
 extern USBD_HandleTypeDef hUsbDeviceFS;   /* 定义在 usb_device.c */
 
@@ -110,6 +112,55 @@ static void app_display(const char *l1, const char *l2)
   }
   s_app.dirty = 1U;
   app_unlock(pm);
+}
+
+/* ------------------------------- D4：按键事件与试触页 ---------------------- */
+#define APP_KEY_EVENT_RELEASE  0xFEU   /* "松手"事件（只给试触页用） */
+
+static touch_filter_t s_filter;    /* 滤波状态（放全局，不放任务栈上） */
+
+/* 按键事件队列：单生产者（keyTask）/ 单消费者（controllerTask）：
+ * 一个写 head 一个写 tail，天然不需要加锁。 */
+static void app_key_push(uint8_t ev)
+{
+  uint8_t next = (uint8_t)((s_app.key_head + 1U) & 0x0FU);
+
+  if (next == s_app.key_tail)
+  {
+    return;                      /* 队满：丢事件（正常操作不会满） */
+  }
+  s_app.key_fifo[s_app.key_head] = ev;
+  s_app.key_head = next;
+}
+
+static uint8_t app_key_pop(uint8_t *ev)
+{
+  if (s_app.key_head == s_app.key_tail)
+  {
+    return 0U;                   /* 队空 */
+  }
+  *ev = s_app.key_fifo[s_app.key_tail];
+  s_app.key_tail = (uint8_t)((s_app.key_tail + 1U) & 0x0FU);
+  return 1U;
+}
+
+/* 试触页：把键号显示到屏幕（D5 换成计算器输入后，这个函数退休） */
+static void app_show_key(uint8_t ev)
+{
+  char t[17];
+
+  if (ev == APP_KEY_EVENT_RELEASE)
+  {
+    app_display("KEY: ---", "touch trial page");
+    return;
+  }
+
+  t[0] = 'K'; t[1] = 'E'; t[2] = 'Y'; t[3] = ':'; t[4] = ' ';
+  t[5] = 'T';
+  t[6] = (char)('0' + (ev / 10U));
+  t[7] = (char)('0' + (ev % 10U));
+  t[8] = '\0';
+  app_display(t, "touch trial page");
 }
 
 /* ------------------------------- D3：串口收发 ------------------------------ */
@@ -206,6 +257,7 @@ static void app_usb_poll(void)
 void calculator_app_init(void)
 {
   lcd1602_init();                          /* LCD 初始化（内部用 HAL_Delay，没问题） */
+  touch_filter_init(&s_filter);
   app_display("MY  MINI  CASIO", "SOEI  2607  LYH"); /* TODO(你写)：改成你自己的欢迎语 */
 }
 
@@ -222,9 +274,18 @@ void calculator_heartbeat_task(void)
 /* 按键任务：D4 再填内容，现在先空转 */
 void calculator_key_task(void)
 {
+  uint32_t prev = 0U;
+
   for (;;)
   {
-    /* TODO(D4)：读键 → 去抖 → 投递事件 */
+    uint32_t raw = ttp229_read_physical();                 /* 库：读 30 位位图 */
+    uint32_t key = touch_filter_update(&s_filter, raw);    /* 你的：滤波 */
+
+    if (key != prev)
+    {
+      app_key_push((key == 0U) ? APP_KEY_EVENT_RELEASE : (uint8_t)__builtin_ctz(key));
+      prev = key;
+    }
     osDelay(APP_KEY_PERIOD_MS);
   }
 }
@@ -257,10 +318,16 @@ void calculator_lcd_task(void)
 /* 控制任务：D3/D4 在这里汇聚"串口数据 + 按键事件" */
 void calculator_controller_task(void)
 {
+  uint8_t ev;
+
   for (;;)
   {
-    app_usb_poll();
-    /* TODO(D4)：按键事件处理 */
+    app_usb_poll();                 /* D3 */
+
+    while (app_key_pop(&ev))        /* D4：按键事件 */
+    {
+      app_show_key(ev);
+    }
     osDelay(APP_CTRL_PERIOD_MS);
   }
 }

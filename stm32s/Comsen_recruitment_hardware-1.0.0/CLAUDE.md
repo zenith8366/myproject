@@ -81,7 +81,7 @@ CMSIS-RTOS v2 接口，**全部静态分配**：5 个任务的栈和 TCB 都是 
 
 `lcd1602_write_lines`/`lcd1602_write_frame` 接收的是**定长 16 字符**的行缓冲（两行 ×16 字符的字符屏）。`touch_filter_t`、`touch_model_t` 的结构体定义是公开的，可直接在栈上或静态分配。
 
-引脚分配只能从 `example/software.ioc` 和 `main.c` 的 `MX_GPIO_Init()` 读到（PB6、PB8、PB10–PB15 推挽输出，PB7、PB9 输入，PC13 输出）；**具体哪个引脚接 LCD、哪个接 TTP229 的信息只存在于库内部和实际板子上**，不要凭猜测断言。TTP229 用的是 GPIO 模拟两线时序，不是硬件 I²C 外设。
+引脚分配：`example/software.ioc` 和 `main.c` 的 `MX_GPIO_Init()`（PB6、PB8、PB10–PB15 推挽输出，PB7、PB9 输入，PC13 输出）。**2026-10-06 已用仓库根 `原理图.png` + 库反汇编双向核实**：LCD1602 经 H3 插座——PB10=RS、PB11=E、PB12–PB15=D4–D7，RW 未接（恒定写模式）；两片 TTP229——U1 片 SCL=PB6 / SDO=PB7、U2 片 SCL=PB8 / SDO=PB9（两片分别管 T0–T14 与 T15–T29 一带，共 30 键）。TTP229 用的是 GPIO 模拟两线时序，不是硬件 I²C 外设。
 
 ## 重新生成 CubeMX 时不要丢的东西
 
