@@ -54,10 +54,26 @@
 
 /* Hook prototypes */
 void vApplicationMallocFailedHook(void);
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName);
 
 /* USER CODE BEGIN 5 */
 void vApplicationMallocFailedHook(void)
 {
+  taskDISABLE_INTERRUPTS();
+  NVIC_SystemReset();
+
+  for (;;)
+  {
+  }
+}
+
+/* 栈溢出钩子（configCHECK_FOR_STACK_OVERFLOW=1 时由内核调用）：
+ * 调试时在 taskDISABLE_INTERRUPTS() 处下断点，查看 pcTaskName 定位是哪个任务；
+ * 运行时策略与 vApplicationMallocFailedHook 一致——复位，而不是带着坏栈继续跑。 */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+  (void)xTask;
+  (void)pcTaskName;
   taskDISABLE_INTERRUPTS();
   NVIC_SystemReset();
 

@@ -22,7 +22,8 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
-
+#include "FreeRTOS.h"      /* 必须排在 stream_buffer.h 之前（后者依赖前者） */
+#include "stream_buffer.h"
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -96,12 +97,18 @@ uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 /* USER CODE BEGIN PRIVATE_VARIABLES */
 static volatile uint8_t export_requested;
 static uint8_t export_match_index;
-/* ===== D3：USB 接收环形缓冲（中断写 head，任务写 tail） ===== */
-#define CDC_RX_RING_SIZE 128U
-static volatile uint8_t  s_rx_ring[CDC_RX_RING_SIZE];
-static volatile uint16_t s_rx_head;      /* 只由 USB 中断修改 */
-static volatile uint16_t s_rx_tail;      /* 只由 CDC_RxTake（任务）修改 */
-static volatile uint8_t  s_rx_overflow;  /* 缓冲满过就会置 1 */
+/* ===== D3：USB 接收用 FreeRTOS 流缓冲（中断写、任务读） =====
+ * 替代早先手写的环形缓冲：写方 = CDC_Receive_FS（USB 中断），
+ * 读方 = CDC_RxTake（controllerTask）；单写单读，流缓冲内部保证一致性，
+ * 任务侧不再需要 PRIMASK 临界区。
+ * 【硬约束】USB 中断优先级（usbd_conf.c 里 USB_LP_CAN1_RX0_IRQn = 5）
+ * 必须始终 ≥ configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY(5)，不得调小，
+ * 否则任务侧临界区屏蔽不住该中断，缓冲会静默损坏。 */
+#define CDC_RX_BUF_SIZE 128U
+static uint32_t s_usb_rx_storage[(CDC_RX_BUF_SIZE + 3U) / 4U];  /* 4 字节对齐存储 */
+static StaticStreamBuffer_t s_usb_rx_cb;                        /* 静态控制块 */
+static StreamBufferHandle_t s_usb_rx;                           /* CDC_RxInit 里创建 */
+static volatile uint8_t s_rx_overflow;    /* 缓冲满过就会置 1 */
 
 /* USER CODE END PRIVATE_VARIABLES */
 
@@ -186,6 +193,8 @@ static int8_t CDC_DeInit_FS(void)
 static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 {
   /* USER CODE BEGIN 5 */
+  (void)pbuf;      /* 本工程不处理线路编码等请求，参数用不到（消 -Wunused-parameter） */
+  (void)length;
   switch(cmd)
   {
     case CDC_SEND_ENCAPSULATED_COMMAND:
@@ -292,21 +301,22 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
     }
   }
 
-  /* ===== D3：把收到的字节塞进环形缓冲 =====
+  /* ===== D3：把收到的字节写进流缓冲（SendFromISR 版本） =====
    * 【铁律 3】这里在 USB 中断上下文：
    *   - 不能 osDelay / HAL_Delay / 刷屏 / 打印
-   *   - 不调用任何 FreeRTOS API（我们的做法就是"只拷贝"）
+   *   - 只用 ISR 安全 API：xStreamBufferSendFromISR 内部只做拷贝，
+   *     没有任务阻塞等待时（读者是非阻塞轮询）不触碰内核，调度器启动前也安全。
    * 你返回后，下面两行生成代码会自动重新武装端点，继续收下一包。 */
-  for (uint32_t i = 0; i < *Len; i++)
+  if (s_usb_rx != NULL)     /* 建缓冲前到达的数据直接丢（正常枚举流程下不会发生） */
   {
-    uint16_t next = (uint16_t)((s_rx_head + 1U) % CDC_RX_RING_SIZE);
-    if (next == s_rx_tail)
+    BaseType_t xWoken = pdFALSE;
+    size_t sent = xStreamBufferSendFromISR(s_usb_rx, Buf, (size_t)(*Len), &xWoken);
+
+    if (sent < (size_t)(*Len))
     {
-      s_rx_overflow = 1U;   /* 满了：丢掉新字节并做记号 */
-      break;
+      s_rx_overflow = 1U;   /* 满了：写多少算多少，做记号（语义同原实现） */
     }
-    s_rx_ring[s_rx_head] = Buf[i];
-    s_rx_head = next;
+    portYIELD_FROM_ISR(xWoken);
   }
   /* USER CODE END 6 */
 
@@ -360,23 +370,25 @@ uint8_t CDC_TakeExportRequest_FS(void)
   return requested;
 }
 
-/* ===== D3：供任务侧取走数据（短临界区，照抄 TakeExport 的姿势） ===== */
+/* 创建接收流缓冲：由 calculator_app_init() 在调度器启动前调用（静态创建，
+ * 不依赖调度器；须早于 USB 数据到达，正常枚举流程下必然满足）。 */
+void CDC_RxInit(void)
+{
+  s_usb_rx = xStreamBufferCreateStatic(CDC_RX_BUF_SIZE, 1U,
+                                       (uint8_t *)s_usb_rx_storage,
+                                       &s_usb_rx_cb);
+}
+
+/* ===== D3：供任务侧取走数据（非阻塞） =====
+ * 0 超时 = 立即返回；流缓冲内部用 BASEPRI 临界区保证与 USB 中断互斥，
+ * 不再需要手写 PRIMASK 开关中断。 */
 uint16_t CDC_RxTake(uint8_t *dst, uint16_t max_len)
 {
-  uint32_t primask = __get_PRIMASK();
-  uint16_t n = 0U;
-
-  __disable_irq();
-  while ((s_rx_tail != s_rx_head) && (n < max_len))
+  if ((dst == NULL) || (max_len == 0U) || (s_usb_rx == NULL))
   {
-    dst[n++] = s_rx_ring[s_rx_tail];
-    s_rx_tail = (uint16_t)((s_rx_tail + 1U) % CDC_RX_RING_SIZE);
+    return 0U;
   }
-  if (primask == 0U)
-  {
-    __enable_irq();
-  }
-  return n;
+  return (uint16_t)xStreamBufferReceive(s_usb_rx, dst, (size_t)max_len, 0U);
 }
 
 uint8_t CDC_RxOverflow(void)

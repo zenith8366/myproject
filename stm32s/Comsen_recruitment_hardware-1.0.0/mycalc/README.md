@@ -3,7 +3,8 @@
 > Comsen 实验室硬件组招新任务 · 完整可编译工程。
 > 本工程由招新仓库中的 `example/` 示例改名而来（本目录原名 `example`），保留示例的
 > FreeRTOS 五任务架构，按根 README 的规则做**同名替换**：三个模块改为自己实现，
-> 两个驱动继续使用提供的静态库。
+> 两个驱动继续使用提供的静态库；任务间通信全部使用 RTOS 消息队列 / 流缓冲
+> （见"四、RTOS 通信架构"）。
 
 ## 一、完成了哪些内容与模块
 
@@ -13,8 +14,8 @@
 | 2. 串口与显示 | USB 虚拟串口接收电脑文本并显示在屏幕（`PC:` + 13 字符滚动窗口），同时回显到电脑；拔插 USB 后功能自动恢复 |
 | 3. 触摸按键 | 自行实现按键滤波（30 ms 三次确认去抖 + 按住只触发一次）与 30 键映射；含按下/释放边沿判定 |
 | 4. 基本计算器 | 数字/四则运算输入、AC 全清、DEL 删除、BACK 撤销（按式子回滚，深度 8 层）、`=` 求值 + 结果回填连续运算 |
-| 5. 函数扩展 | 自写递归下降求值器：括号嵌套、sin/cos/tan（DEG/RAD 感知）、log/ln/sqrt、pi/e、E 科学计数、隐式乘法（如 `2pi`、`3sin(30)`）、幂运算 `x^y`（SHIFT+`*`，实数 + 复数域） |
-| 6. 自选提高 | 复数运算（CMPLX 模式：`i`、极坐标 `a@θ`、复数四则）、显示精度切换（FMT：2/4/6 位小数）、SHIFT 副功能、编辑光标、MODE 设置菜单 |
+| 5. 函数扩展 | 自写递归下降求值器：括号嵌套（上限 8 层，超出提示 `! too deep`）、sin/cos/tan（DEG/RAD 感知）、log/ln/sqrt、pi/e、E 科学计数、隐式乘法（如 `2pi`、`3sin(30)`）、幂运算 `x^y`（SHIFT+`*`，实数 + 复数域）；错误提示细分（`! bracket` / `! bad op` / `! syntax` / `! domain` / `! div by 0`） |
+| 6. 自选提高 | 复数运算（CMPLX 模式：`i`、极坐标 `a@θ`、复数四则）、显示精度切换（FMT：2/4/6 位小数）、SHIFT 副功能、编辑光标、MODE 设置菜单；RTOS 解耦（消息队列传按键/显示/求值，求值搬进 computeTask）与开机触摸自检 |
 
 ### 按键布局（6 行 × 5 列，共 30 键）
 
@@ -41,7 +42,7 @@
 
 | 自己实现的文件 | 替换的库 | 内容 |
 | --- | --- | --- |
-| `User/calculator_app.c` | libcalculator_app.a | 五个任务体、按键映射与事件队列、输入状态机、撤销栈、显示快照与编辑光标、USB 收发应用逻辑 |
+| `User/calculator_app.c` | libcalculator_app.a | 五个任务体、按键映射、输入状态机、撤销栈、显示帧队列与编辑光标、求值异步化（请求/结果队列）、USB 收发应用逻辑 |
 | `User/touch_filter.c` | libtouch_filter.a | 触摸滤波：每 10 ms 一次的稳定判定 + 单键锁定（按住只触发一次） |
 | `User/calculator_engine.c` | libcalculator_engine.a | 表达式求值器：递归下降（表达式 → 项 → 因子），含括号、函数、复数、隐式乘法 |
 
@@ -72,14 +73,40 @@
 
 - `Core/Src/main.c` —— USER CODE 内解除 USB 屏蔽宏、新增 `MX_USB_DEVICE_Init()` 调用
   （示例默认不启动 USB，任务 2 需要）
-- `USB_DEVICE/App/usbd_cdc_if.c` / `.h` —— 新增 128 字节接收环形缓冲与
-  `CDC_RxTake()` / `CDC_RxOverflow()` 接口
+- `USB_DEVICE/App/usbd_cdc_if.c` / `.h` —— 接收改用 FreeRTOS **静态流缓冲**
+  （xStreamBuffer，USB 中断里 `SendFromISR`），保留 `CDC_RxTake()` / `CDC_RxOverflow()`
+  接口并新增 `CDC_RxInit()`
+- `Core/Inc/FreeRTOSConfig.h` —— 打开 `configCHECK_FOR_STACK_OVERFLOW`（配套
+  `Core/Src/freertos.c` 新增 `vApplicationStackOverflowHook`）
 - `CMakeLists.txt` —— 加入 `User/` 三个源文件；移除被替换的 4 个库；链接数学库 `m`；
   Debug 追加 `-Og`（默认 `-O0` 镜像会超出 64 KiB Flash）
+- `software.ioc` —— 同步任务参数改动（computeTask 栈 3328 B / 优先级 Normal / 栈检查开关），
+  保证 CubeMX 重新生成时不被覆盖回去
 
-未改动：HAL/CMSIS/FreeRTOS/USB 协议栈源码、CubeMX 生成代码的非 USER CODE 区域、`software.ioc`。
+未改动：HAL/CMSIS/FreeRTOS/USB 协议栈源码、CubeMX 生成代码的非 USER CODE 区域。
 
-## 四、如何编译
+## 四、RTOS 通信架构（任务之间怎么"说话"）
+
+五个任务之间不共享可写变量，不用关中断互斥；一切跨任务数据都走 RTOS 对象
+（在 `calculator_app_init()` 里**静态创建**，不占那 1 KB 的堆）：
+
+| 通道 | 对象 | 消息 | 生产者 → 消费者 |
+| --- | --- | --- | --- |
+| 按键事件 | 消息队列 `keyQ`（深 16） | 1 字节物理键号 | keyTask → controllerTask |
+| 显示帧 | 消息队列 `lcdQ`（深 4） | 两行 16 字符 + 光标状态 | controllerTask → lcdTask（满时丢最旧、同内容去重） |
+| 求值请求 | 消息队列 `reqQ`（深 2） | 表达式 + 角度制/复数/精度快照 | controllerTask → computeTask |
+| 求值结果 | 消息队列 `resQ`（深 2） | 结果串 + 序号 + 状态 | computeTask → controllerTask |
+| 串口接收 | 静态流缓冲 `xStreamBuffer` | 原始字节流 | USB 中断（`SendFromISR`）→ controllerTask |
+
+- **求值是异步的**（computeTask 不再空转）：按 `=` 只投一份请求、不阻塞控制任务；
+  computeTask 阻塞等 `reqQ`、算完把结果投 `resQ`；控制任务每周期非阻塞取回，
+  按"序号 + 表达式内容版本号"双判据决定是否应用——求值期间用户已改式子就丢弃结果，
+  不打断输入；200 ms 兜底超时防界面卡死在"在途"。
+- **约束**：USB 中断优先级（`usbd_conf.c` 里 `USB_LP_CAN1_RX0_IRQn = 5`）必须
+  ≥ `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY(5)`，不得调小——否则任务侧
+  临界区屏蔽不住该中断，流缓冲会静默损坏。
+
+## 五、如何编译
 
 环境：`arm-none-eabi-gcc`（Arm GNU Toolchain）在 PATH，CMake + Ninja。
 本机一键脚本（内部把 STM32CubeCLT 的 cmake/ninja 加进 PATH）：
@@ -101,24 +128,34 @@ cmake --build build/Debug
 烧录：STM32CubeProgrammer 或 OpenOCD + ST-Link；BIN 写入内部 Flash 的起始地址为 `0x08000000`。
 用 CubeMX 打开 `software.ioc` 可查看引脚、时钟与外设配置。
 
-## 五、资源占用（2026-10-06，Arm GNU Toolchain 15.3.1）
+## 六、资源占用（2026-10-07，Arm GNU Toolchain 15.3.1）
 
 | 配置 | FLASH | RAM |
 | --- | --- | --- |
-| Debug（-Og） | 46804 B / 64 KB（71.4%） | 14256 B / 20 KB（69.6%） |
-| Release | 41332 B / 64 KB（63.1%） | 14240 B / 20 KB（69.5%） |
+| Debug（-Og） | 51488 B / 64 KB（78.6%） | 16608 B / 20 KB（81.1%） |
+| Release | 44848 B / 64 KB（68.4%） | 16600 B / 20 KB（81.1%） |
 
-## 六、已知问题与说明
+## 七、已知问题与说明
 
-- **测试状态**：最新固件已烧录实物板整机验收通过，覆盖：串口收发 / 触摸按键 / 四则运算与
-  错误处理 / 编辑键（AC、BACK、DEL）/ SHIFT 副功能 / 函数与括号 / 复数 / 编辑光标 /
-  长时间运行与连续乱按的鲁棒性。
+- **测试状态**：2026-10-06 版本（RTOS 重构前）已烧录实物板整机验收通过，覆盖：串口收发 /
+  触摸按键 / 四则运算与错误处理 / 编辑键（AC、BACK、DEL）/ SHIFT 副功能 / 函数与括号 /
+  复数 / 编辑光标 / 长时间运行与连续乱按的鲁棒性。2026-10-07 的 RTOS 重构（本版）已通过
+  编译（Debug/Release 零告警）与 PC 端引擎断言（66/66），**上板整机复验待做**。
 - **功能边界**（如实列出）：
   - sin/cos/tan 在 CMPLX 模式下不支持复数参数（提示 `! domain`）；
   - SHIFT + `8`/`9`（∠、i）仅 CMPLX 模式生效；`tan` 在 90°+k·180° 等无定义点显示 `Error`；
   - 结果超出 ±1e9 或无效运算显示 `Error`；小数位数由 FMT 设定（2/4/6）；
+  - 表达式最长 63 字符（满提示 `! buf full`）；显示为两行 × 16 字符的滚动窗口、跟随光标；
+  - 括号/函数嵌套上限 8 层（超出提示 `! too deep`，防解析栈溢出；computeTask 栈 3328 B
+    按实测栈帧算过上界，`g_stack_hwm` 可实测复核）；
+  - 错误提示细分：`! bracket`（括号不匹配）/ `! bad op`（操作数缺失）/ `! syntax`（词法）/
+    `! domain` / `! div by 0` / `! timeout`（求值兜底）；
+  - 开机自检：连续 5 次读到"30 键全按下"（0x3FFFFFFF，物理不可能——芯片无响应/接线
+    故障的特征）则显示 `TOUCH ERR`，按任意键放行主界面；正常静默（全 0）不会误报；
+  - 栈余量监测：调试器读 `g_stack_hwm[0..4]`（compute/controller/lcd/key/heartbeat）
+    可见各任务剩余栈字节数；
   - COMP/CMPLX、DEG/RAD、FMT 三项设置掉电不保存（重启回默认值，无持久化存储设计）。
 - **硬件使用提醒**：板背面对手部接近敏感、可能误触，建议用纸壳等非导电支撑物垫高使用
   （与官方 README 的提醒一致）。
-- **Flash 余量**：Debug 构建已占 71.4%（默认 `-O0` 会超限，故 Debug 使用 `-Og`），
-  后续继续加功能需留意空间。
+- **Flash 余量**：Debug 构建已占 78.6%（默认 `-O0` 会超限，故 Debug 使用 `-Og`），
+  后续继续加功能需留意空间；Release 尚有约 20 KB。

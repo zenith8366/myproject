@@ -39,6 +39,11 @@
 #define CALC_LN10  2.30258509299405f
 #define CALC_TAN_EPS 1.0e-6f   /* tan 判域阈值：|cos| 小于它视为 π/2+kπ（无定义） */
 
+/* 表达式嵌套深度上限：每个 '(' / 函数括号体 / '^' / 一元 ± 记一层（入口 depth=0）。
+ * 上限 8 层 → 解析栈上界 ≈ 32 + 8×336 + 12 ≈ 2732 B（-Og 实测帧：括号层 272 B、
+ * 函数层 336 B），computeTask 栈 3328 B 覆盖有余。超限返回 CALC_DEPTH。 */
+#define CALC_MAX_DEPTH 8U
+
 /* 解析上下文：角度制 / 是否允许复数（由 calculator_evaluate 的参数带入） */
 typedef struct
 {
@@ -136,6 +141,21 @@ static calc_status_t cx_pow(calc_complex_t a, calc_complex_t b,
 
 /* ------------------------------- 词法/语法 -------------------------------- */
 
+/* 期望"操作数"却读到字符 c 时的精确错误分类（App 会显示成不同文案） */
+static calc_status_t err_expected_operand(char c)
+{
+  if (c == ')')
+  {
+    return CALC_BRACKET;             /* 空括号 "()"、"2+)" —— 括号里缺东西 */
+  }
+  if ((c == '+') || (c == '-') || (c == '*') || (c == '/') ||
+      (c == '^') || (c == '@') || (c == '\0'))
+  {
+    return CALC_BAD_OP;              /* "2+"、"2*"、"2^"、"2@" —— 操作数缺失 */
+  }
+  return CALC_SYNTAX;                /* 其它（如单独 '.'）—— 词法错 */
+}
+
 /* 读一个数字（纯数字部分；正负号归 parse_factor，复数单位 i 归 primary） */
 static calc_status_t parse_number(const char **p, calc_complex_t *out)
 {
@@ -144,7 +164,7 @@ static calc_status_t parse_number(const char **p, calc_complex_t *out)
 
   if (*s < '0' || *s > '9')            /* 至少要有 1 位数字 */
   {
-    return CALC_SYNTAX;
+    return err_expected_operand(*s);
   }
   while (*s >= '0' && *s <= '9')
   {
@@ -207,17 +227,22 @@ static calc_status_t parse_number(const char **p, calc_complex_t *out)
 
 /* 前向声明：primary ↔ expression 互相递归调用 */
 static calc_status_t parse_expression(const char **p, calc_complex_t *out,
-                                      const parse_ctx_t *ctx);
+                                      const parse_ctx_t *ctx, uint8_t depth);
 
 /* 函数：吃掉 "名字( 表达式 )" 并计算。
  * 实数参数走实数库函数；复数参数见开头注释的功能范围。 */
 static calc_status_t parse_function(const char **p, calc_complex_t *out,
-                                    const parse_ctx_t *ctx)
+                                    const parse_ctx_t *ctx, uint8_t depth)
 {
   const char *s = *p;
   calc_complex_t v;
   calc_status_t st;
   uint8_t kind;
+
+  if (depth > CALC_MAX_DEPTH)
+  {
+    return CALC_DEPTH;
+  }
 
   if (s[0] == 's' && s[1] == 'i' && s[2] == 'n')
   {
@@ -256,17 +281,17 @@ static calc_status_t parse_function(const char **p, calc_complex_t *out,
 
   if (*s != '(')                       /* 函数名后必须紧跟 '('（按键输入会自动带上） */
   {
-    return CALC_SYNTAX;
+    return CALC_BRACKET;
   }
   s++;
-  st = parse_expression(&s, &v, ctx);
+  st = parse_expression(&s, &v, ctx, (uint8_t)(depth + 1U));   /* 函数括号体：记一层 */
   if (st != CALC_OK)
   {
     return st;
   }
-  if (*s != ')')
+  if (*s != ')')                       /* 函数参数后缺 ')'（如 "sin(30"） */
   {
-    return CALC_SYNTAX;
+    return CALC_BRACKET;
   }
   s++;
 
@@ -371,23 +396,28 @@ static calc_status_t parse_function(const char **p, calc_complex_t *out,
 
 /* 主元：数字 | '(' 表达式 ')' | 常数 pi / e / i | 函数 */
 static calc_status_t parse_primary(const char **p, calc_complex_t *out,
-                                   const parse_ctx_t *ctx)
+                                   const parse_ctx_t *ctx, uint8_t depth)
 {
   const char *s = *p;
+
+  if (depth > CALC_MAX_DEPTH)
+  {
+    return CALC_DEPTH;
+  }
 
   if (*s == '(')
   {
     calc_status_t st;
 
     s++;
-    st = parse_expression(&s, out, ctx);
+    st = parse_expression(&s, out, ctx, (uint8_t)(depth + 1U));   /* 括号：记一层 */
     if (st != CALC_OK)
     {
       return st;
     }
-    if (*s != ')')
+    if (*s != ')')                     /* '(' 之后缺 ')'（如 "(1+2"） */
     {
-      return CALC_SYNTAX;
+      return CALC_BRACKET;
     }
     *p = s + 1;
     return CALC_OK;
@@ -412,26 +442,31 @@ static calc_status_t parse_primary(const char **p, calc_complex_t *out,
   }
   if (s[0] >= 'a' && s[0] <= 'z')      /* 其它字母开头 → 函数（不认识就报语法错） */
   {
-    return parse_function(p, out, ctx);
+    return parse_function(p, out, ctx, depth);   /* 函数名本身不记层，括号体记 */
   }
   return parse_number(p, out);
 }
 
 /* 前向声明：power 的右操作数要递归回 factor（右结合 + 允许指数带一元符号） */
 static calc_status_t parse_factor(const char **p, calc_complex_t *out,
-                                  const parse_ctx_t *ctx);
+                                  const parse_ctx_t *ctx, uint8_t depth);
 
 /* 幂：primary ('^' factor)? —— 右结合（2^3^2 = 2^(3^2)）；
  * 指数走 factor，所以允许一元符号（2^-3）与继续叠幂。
  * 优先级：高于 * /（2*3^2 = 18）；一元符号比它低（-2^2 = -(2^2) = -4）。 */
 static calc_status_t parse_power(const char **p, calc_complex_t *out,
-                                 const parse_ctx_t *ctx)
+                                 const parse_ctx_t *ctx, uint8_t depth)
 {
   const char *s = *p;
   calc_complex_t base;
   calc_status_t st;
 
-  st = parse_primary(&s, &base, ctx);
+  if (depth > CALC_MAX_DEPTH)
+  {
+    return CALC_DEPTH;
+  }
+
+  st = parse_primary(&s, &base, ctx, depth);
   if (st != CALC_OK)
   {
     return st;
@@ -441,7 +476,7 @@ static calc_status_t parse_power(const char **p, calc_complex_t *out,
     calc_complex_t ex;
 
     s++;
-    st = parse_factor(&s, &ex, ctx);   /* "2^" 后面没数 → 语法错自然上抛 */
+    st = parse_factor(&s, &ex, ctx, (uint8_t)(depth + 1U));   /* '^' 右结合：记一层 */
     if (st != CALC_OK)
     {
       return st;
@@ -459,39 +494,49 @@ static calc_status_t parse_power(const char **p, calc_complex_t *out,
 
 /* 因子：一元 + / - 前缀，后面跟幂。支持 "-5+3"、"3+-4"、"(-2)" */
 static calc_status_t parse_factor(const char **p, calc_complex_t *out,
-                                  const parse_ctx_t *ctx)
+                                  const parse_ctx_t *ctx, uint8_t depth)
 {
   const char *s = *p;
+
+  if (depth > CALC_MAX_DEPTH)
+  {
+    return CALC_DEPTH;
+  }
 
   if (*s == '+')
   {
     *p = s + 1;
-    return parse_factor(p, out, ctx);
+    return parse_factor(p, out, ctx, (uint8_t)(depth + 1U));   /* 一元链：记一层 */
   }
   if (*s == '-')
   {
     calc_status_t st;
 
     *p = s + 1;
-    st = parse_factor(p, out, ctx);
+    st = parse_factor(p, out, ctx, (uint8_t)(depth + 1U));     /* 一元链：记一层 */
     if (st == CALC_OK)
     {
       *out = cx_make(-out->real, -out->imag);
     }
     return st;
   }
-  return parse_power(p, out, ctx);
+  return parse_power(p, out, ctx, depth);
 }
 
 /* 读"一项"：因子 + 乘除（含隐式乘法："2pi"、"3sin(30)"、"10.00i"）。 */
 static calc_status_t parse_term(const char **p, calc_complex_t *out,
-                                const parse_ctx_t *ctx)
+                                const parse_ctx_t *ctx, uint8_t depth)
 {
   const char *s = *p;
   calc_complex_t v;
   calc_status_t st;
 
-  st = parse_factor(&s, &v, ctx);
+  if (depth > CALC_MAX_DEPTH)
+  {
+    return CALC_DEPTH;
+  }
+
+  st = parse_factor(&s, &v, ctx, depth);
   if (st != CALC_OK)
   {
     return st;
@@ -514,10 +559,10 @@ static calc_status_t parse_term(const char **p, calc_complex_t *out,
       op = '*';                        /* 隐式乘法：不消耗字符，直接读下一个因子 */
     }
 
-    st = parse_factor(&s, &rhs, ctx);
+    st = parse_factor(&s, &rhs, ctx, depth);
     if (st != CALC_OK)
     {
-      return CALC_SYNTAX;              /* 例："2*" 后面没数 */
+      return st;                       /* 透传下层精确错误（"2*" → BAD_OP、"2*(" → BRACKET） */
     }
     if (op == '/')
     {
@@ -542,14 +587,19 @@ static calc_status_t parse_term(const char **p, calc_complex_t *out,
  *   a + b / a - b：复数加减；
  *   a@θ：极坐标——a·(cosθ + i·sinθ)，θ 按 angle_unit 换算（角度/弧度）。 */
 static calc_status_t parse_expression(const char **p, calc_complex_t *out,
-                                      const parse_ctx_t *ctx)
+                                      const parse_ctx_t *ctx, uint8_t depth)
 {
   const char *q = *p;
   calc_complex_t acc;
   calc_complex_t term;
   calc_status_t st;
 
-  st = parse_term(&q, &acc, ctx);
+  if (depth > CALC_MAX_DEPTH)
+  {
+    return CALC_DEPTH;
+  }
+
+  st = parse_term(&q, &acc, ctx, depth);
   if (st != CALC_OK)
   {
     return st;
@@ -560,7 +610,7 @@ static calc_status_t parse_expression(const char **p, calc_complex_t *out,
     char op = *q;
 
     q++;
-    st = parse_term(&q, &term, ctx);
+    st = parse_term(&q, &term, ctx, depth);
     if (st != CALC_OK)
     {
       return st;
@@ -609,14 +659,15 @@ calc_status_t calculator_evaluate(const char *expression,
   ctx.unit = angle_unit;
   ctx.allow_complex = allow_complex;
 
-  st = parse_expression(&p, &v, &ctx);
+  st = parse_expression(&p, &v, &ctx, 0U);   /* depth=0：还没进任何嵌套 */
   if (st != CALC_OK)
   {
     return st;
   }
   if (*p != '\0')
   {
-    return CALC_SYNTAX;        /* 尾巴没吃完，比如 "3+"、"1+2)" */
+    /* 尾巴没吃完：多余的 ')'（"1+2)"、"1)2"）算括号错；其它算语法错 */
+    return (*p == ')') ? CALC_BRACKET : CALC_SYNTAX;
   }
 
   *result = v;

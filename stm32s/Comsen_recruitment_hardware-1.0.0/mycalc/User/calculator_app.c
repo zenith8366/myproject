@@ -7,7 +7,7 @@
  *     calculator_key_task()         读触摸按键
  *     calculator_lcd_task()         刷新 LCD（唯一允许碰 LCD 的任务）
  *     calculator_controller_task()  控制逻辑（按键、串口数据的汇合处）
- *     calculator_compute_task()     重计算（栈最大 2048 B）
+ *     calculator_compute_task()     重计算（栈最大 3328 B，表达式求值在这里跑）
  *   少写一个，链接就会报 undefined reference to `calculator_xxx_task'。
  *
  * 【纪律】除了这 6 个函数，本文件其它函数/变量全部 static，
@@ -17,10 +17,11 @@
 #include "calculator_app.h"   /* 保证与 main.c 看到的函数签名完全一致 */
 #include "main.h"             /* HAL_GPIO_TogglePin / GPIOC / GPIO_PIN_13 */
 #include "cmsis_os.h"         /* osDelay、栈高水位查询等（FreeRTOS 的封装） */
+#include "queue.h"            /* StaticQueue_t：静态消息队列的控制块类型 */
 #include "lcd1602.h"          /* 显示库接口 */
 #include "usb_device.h"       /* USBD_STATE_CONFIGURED 等 */
 #include "usbd_cdc_if.h"      /* CDC_Transmit_FS / CDC_RxTake */
-#include <string.h>           /* 不用也行，可删 */
+#include <string.h>           /* memcmp（显示帧去重） */
 #include "ttp229.h"           /* 物理按键原始读取（继续用库） */
 #include "touch_filter.h"     /* 你的 touch_filter.c 的接口（同名） */
 #include "calculator_engine.h" /* D6：求值器接口（你的 calculator_engine.c 实现） */
@@ -30,53 +31,155 @@ extern USBD_HandleTypeDef hUsbDeviceFS;   /* 定义在 usb_device.c */
 /* ------------------------------- 可调参数 -------------------------------- */
 #define APP_KEY_PERIOD_MS    10U    /* 触摸扫描周期：库约定 10ms 一次 */
 #define APP_CTRL_PERIOD_MS   10U    /* 控制任务周期 */
-#define APP_LCD_PERIOD_MS   100U    /* 刷新周期：LCD 库内部用 HAL_Delay 逐字节写，别设太小 */
 #define APP_HB_PERIOD_MS    500U    /* 心跳灯：每 500ms 翻转一次 = 每秒闪 1 下 */
 #define APP_SPLASH_MS      1500U    /* 欢迎页停留时长，之后自动切到主界面 */
 
-/* -------------------------------- 共享状态 ------------------------------- */
-/* 【FreeRTOS 学习点】5 个任务共享一份数据，规则只有两条：
- *   1) 每个字段只有一个"写者"任务；
- *   2) 读快照时用 app_lock()/app_unlock() 包住"拷贝那几个字节"的一瞬间，
- *      临界区里绝不做慢操作（LCD、延时、串口都是慢操作）。       */
+/* --------------------------- 显示格式化常量 ------------------------------ */
+/* app_format_float / app_format_value 的尺寸与阈值：别再用裸数字 */
+#define FMT_INT_DIGITS_MAX  12U     /* 整数部分最多显示位数（缓冲的容量上限） */
+#define FMT_INT_TMP_SIZE    16U     /* 整数位倒序生成的临时缓冲（≥ MAX+1） */
+#define FMT_VALUE_MAX       48U     /* 单个数值/结果字符串的最大长度（"a±bi" 全形态） */
+#define FMT_RESULT_LINE_MAX 15U     /* "=" 结果行最多放 15 个字符（超出取尾部） */
+#define FMT_IMAG_TMP_SIZE   20U     /* 虚部分量临时缓冲（含符号/小数点/'\0'） */
+#define FMT_ZERO_EPS        0.5f    /* 半个显示单位：以下归零（防 "-0.00" 噪声） */
+#define FMT_RANGE_LIMIT     1.0e9f  /* ±量程：超出（含 NaN/Inf）显示 "Error" */
+#define LCD_COLS            16U     /* 1602 每行 16 字符 */
+#define APP_EXPR_MAX        64U     /* 表达式缓冲大小（可输入 63 字符 + '\0'） */
+#define APP_EVAL_TIMEOUT_MS 200U    /* 求值兜底超时：算这么久还没回就放弃（正常 <30ms） */
+#define APP_HWM_PERIOD_MS  10000U   /* 栈余量采样周期（调试用，见下） */
+
+/* ---------------------------- 栈余量监测（调试用） ---------------------------- */
+/* 每 10s 采一轮各任务的剩余栈（字节，由 osThreadGetStackSpace 从栈高水位算出）。
+ * 上板时喂最坏输入（8 层嵌套 / 63 字符长式子）后用调试器按名字读取：
+ *   g_stack_hwm = [0]computeTask [1]controllerTask [2]lcdTask [3]KeyTask [4]heartbeat
+ * 判据：computeTask 剩余 ≥ ~400B（engine 的上界公式见 CALC_MAX_DEPTH 注释）。 */
+volatile uint32_t g_stack_hwm[5];   /* 故意非 static：让调试器按符号名直接查 */
+
+extern osThreadId_t calculatorTaskHandle;   /* main.c 里的任务句柄 */
+extern osThreadId_t controllerTaskHandle;
+extern osThreadId_t lcdTaskHandle;
+extern osThreadId_t KeyTaskHandle;
+extern osThreadId_t defaultTaskHandle;
+
+/* FMT 显示精度档位：值 = 小数位数。s_frac_digits 用它，不再出现裸 2/4/6 */
+typedef enum { FMT_2 = 2, FMT_4 = 4, FMT_6 = 6 } fmt_digits_t;
+
+/* --------------------------- 任务间通信（RTOS 对象） -------------------------- */
+/* 【FreeRTOS 学习点】任务之间不再靠"共享变量 + 关中断互斥"，而是用 RTOS 对象传数据：
+ *   keyTask     --消息队列 keyQ-->  controllerTask（按键事件）
+ *   controller  --消息队列 lcdQ-->  lcdTask（显示帧；满时丢最旧、最新帧胜出）
+ *   controller  --消息队列 reqQ-->  computeTask（求值请求，带完整快照）
+ *   computeTask --消息队列 resQ-->  controllerTask（求值结果）
+ * 队列自带临界区保护；本文件不再需要任何 PRIMASK 关中断。
+ * 每个 static 变量仍然只有一个写者任务——这条纪律在多任务里永远要守住。 */
+
+/* 显示帧：controller 发给 lcdTask 的一条"整屏内容"（定长，可直接进队列） */
 typedef struct
 {
-  char             line1[16];   /* LCD 快照第 1 行：定长 16，不含结束符 */
-  char             line2[16];   /* LCD 快照第 2 行 */
-  volatile uint8_t dirty;       /* 有新内容置 1，lcdTask 显示完清 0 */
+  char    line1[16];            /* 定长 16，不含结束符 */
+  char    line2[16];
+  uint8_t cur_on;               /* 编辑光标：1=显示（硬件光标，lcd1602_write_frame） */
+  uint8_t cur_row;              /* 光标行 0/1 */
+  uint8_t cur_col;              /* 光标列 0~15 */
+} lcd_frame_t;
 
-  volatile uint8_t cur_on;      /* 编辑光标：1=显示（硬件光标，lcd1602_write_frame） */
-  volatile uint8_t cur_row;     /* 光标行 0/1 */
-  volatile uint8_t cur_col;     /* 光标列 0~15 */
+/* 按键事件 */
+typedef struct
+{
+  uint8_t key;                  /* 物理键号 0~29 */
+} key_evt_t;
 
-  uint8_t          key_fifo[16];/* 按键事件队列：keyTask 写、controllerTask 读 */
-  volatile uint8_t key_head;
-  volatile uint8_t key_tail;
-} app_state_t;
+#define APP_KEY_Q_DEPTH 16U
+#define APP_LCD_Q_DEPTH 4U
 
-static app_state_t s_app;       /* 放全局 .bss 区，不要放任务栈上！ */
+static StaticQueue_t      s_key_q_cb;
+static uint32_t           s_key_q_mem[(APP_KEY_Q_DEPTH * sizeof(key_evt_t) + 3U) / 4U];
+static osMessageQueueId_t s_key_q;
+static const osMessageQueueAttr_t s_key_q_attr =
+{
+  .name    = "keyQ",
+  .cb_mem  = &s_key_q_cb,
+  .cb_size = sizeof(s_key_q_cb),
+  .mq_mem  = &s_key_q_mem[0],
+  .mq_size = sizeof(s_key_q_mem),
+};
+
+static StaticQueue_t      s_lcd_q_cb;
+static uint32_t           s_lcd_q_mem[(APP_LCD_Q_DEPTH * sizeof(lcd_frame_t) + 3U) / 4U];
+static osMessageQueueId_t s_lcd_q;
+static const osMessageQueueAttr_t s_lcd_q_attr =
+{
+  .name    = "lcdQ",
+  .cb_mem  = &s_lcd_q_cb,
+  .cb_size = sizeof(s_lcd_q_cb),
+  .mq_mem  = &s_lcd_q_mem[0],
+  .mq_size = sizeof(s_lcd_q_mem),
+};
+
+/* 求值请求/结果：controller → computeTask → controller（求值解耦的核心）。
+ * 两条消息都带完整快照——computeTask 不读任何 UI 状态、controller 不跑来算数，
+ * 两边唯一的耦合就是这两个队列。 */
+typedef struct
+{
+  char    expr[APP_EXPR_MAX];   /* 表达式快照（按下 = 瞬间的完整式子） */
+  uint8_t serial;               /* 请求序号（结果配对用；0 保留给"空闲"） */
+  uint8_t angle_rad;            /* 角度制快照 */
+  uint8_t cmplx;                /* 复数模式快照 */
+  uint8_t frac;                 /* FMT 精度档位快照 */
+} calc_req_t;
+
+typedef struct
+{
+  char          text[FMT_VALUE_MAX];  /* 已格式化好的结果串（CALC_OK 时有效） */
+  uint8_t       serial;               /* 对应请求的序号 */
+  uint8_t       len;                  /* text 的长度 */
+  calc_status_t status;               /* 求值状态 */
+} calc_res_t;
+
+#define APP_EVAL_Q_DEPTH 2U
+
+static StaticQueue_t      s_req_q_cb;
+static uint32_t           s_req_q_mem[(APP_EVAL_Q_DEPTH * sizeof(calc_req_t) + 3U) / 4U];
+static osMessageQueueId_t s_req_q;
+static const osMessageQueueAttr_t s_req_q_attr =
+{
+  .name    = "reqQ",
+  .cb_mem  = &s_req_q_cb,
+  .cb_size = sizeof(s_req_q_cb),
+  .mq_mem  = &s_req_q_mem[0],
+  .mq_size = sizeof(s_req_q_mem),
+};
+
+static StaticQueue_t      s_res_q_cb;
+static uint32_t           s_res_q_mem[(APP_EVAL_Q_DEPTH * sizeof(calc_res_t) + 3U) / 4U];
+static osMessageQueueId_t s_res_q;
+static const osMessageQueueAttr_t s_res_q_attr =
+{
+  .name    = "resQ",
+  .cb_mem  = &s_res_q_cb,
+  .cb_size = sizeof(s_res_q_cb),
+  .mq_mem  = &s_res_q_mem[0],
+  .mq_size = sizeof(s_res_q_mem),
+};
+
+/* 一次性创建全部 RTOS 对象（全部静态存储，不占那 1KB 的堆）。
+ * 由 calculator_app_init 在调度器启动之前调用——静态创建不依赖调度器。 */
+static void app_rtos_init(void)
+{
+  s_key_q = osMessageQueueNew(APP_KEY_Q_DEPTH, sizeof(key_evt_t), &s_key_q_attr);
+  s_lcd_q = osMessageQueueNew(APP_LCD_Q_DEPTH, sizeof(lcd_frame_t), &s_lcd_q_attr);
+  s_req_q = osMessageQueueNew(APP_EVAL_Q_DEPTH, sizeof(calc_req_t), &s_req_q_attr);
+  s_res_q = osMessageQueueNew(APP_EVAL_Q_DEPTH, sizeof(calc_res_t), &s_res_q_attr);
+}
+
+/* 全部 RTOS 对象就绪 ? 1 : 0（init 里校验；失败要停机报错，不能带着坏队列跑） */
+static uint8_t app_rtos_ready(void)
+{
+  return ((s_key_q != NULL) && (s_lcd_q != NULL) &&
+          (s_req_q != NULL) && (s_res_q != NULL)) ? 1U : 0U;
+}
 
 /* -------------------------------- 小工具 --------------------------------- */
-
-/* 超短临界区的开启/恢复：关中断 → 干那一两微秒的活 → 恢复原状态。
- * 【为什么不用 taskENTER_CRITICAL】那个 API 只有调度器启动之后才能正常配对；
- * 本文件的 app_display 在"调度器启动前"（calculator_app_init 里）也会被调用，
- * 所以用 PRIMASK 保存/恢复这招——不挑时机，而且和 usbd_cdc_if.c 里
- * CDC_TakeExportRequest_FS 的写法完全一致。 */
-static uint32_t app_lock(void)
-{
-  uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  return primask;
-}
-
-static void app_unlock(uint32_t primask)
-{
-  if (primask == 0U)
-  {
-    __enable_irq();
-  }
-}
 
 /* 数一串字符的长度，最多数到 16（不想依赖 strlen 就这么写） */
 static uint8_t app_len16(const char *s)
@@ -101,61 +204,85 @@ static void app_fill16(char out[16], const char *s)
   }
 }
 
-/* 更新"显示快照"（带编辑光标参数）。跨任务写共享数据的标准姿势，照抄即可。 */
+/* 发一帧到显示队列。与上一帧完全相同就跳过（去重，省一次 LCD 慢写）；
+ * 队列满时先丢最旧的一帧——"最新帧胜出"，屏幕最终必与最新状态一致。 */
+static void app_display_post(const lcd_frame_t *f)
+{
+  static lcd_frame_t s_last;       /* 上一帧（本模块私有） */
+  static uint8_t     s_last_valid;
+
+  if ((s_last_valid != 0U) && (memcmp(&s_last, f, sizeof(*f)) == 0))
+  {
+    return;                        /* 内容没变：不必重绘 */
+  }
+  s_last = *f;
+  s_last_valid = 1U;
+
+  if (osMessageQueuePut(s_lcd_q, f, 0U, 0U) != osOK)
+  {
+    lcd_frame_t drop;
+
+    (void)osMessageQueueGet(s_lcd_q, &drop, NULL, 0U);   /* 丢最旧 */
+    (void)osMessageQueuePut(s_lcd_q, f, 0U, 0U);
+  }
+}
+
+/* 更新显示（带编辑光标参数）：组帧 → 入队 */
 static void app_display_ex(const char *l1, const char *l2,
                            uint8_t cur_on, uint8_t cur_row, uint8_t cur_col)
 {
-  char     t1[16], t2[16];
-  uint32_t pm;
+  lcd_frame_t f;
 
-  app_fill16(t1, l1);
-  app_fill16(t2, l2);
+  app_fill16(f.line1, l1);
+  app_fill16(f.line2, l2);
+  f.cur_on  = cur_on;
+  f.cur_row = cur_row;
+  f.cur_col = cur_col;
 
-  pm = app_lock();
-  for (uint8_t i = 0U; i < 16U; i++)
-  {
-    s_app.line1[i] = t1[i];
-    s_app.line2[i] = t2[i];
-  }
-  s_app.cur_on  = cur_on;
-  s_app.cur_row = cur_row;
-  s_app.cur_col = cur_col;
-  s_app.dirty = 1U;
-  app_unlock(pm);
+  app_display_post(&f);
 }
 
-/* 不带光标版（菜单 / 结果 / 错误 / 欢迎页等"特殊视图"用） */
+/* 不带光标版（菜单 / 结果 / 错误等"特殊视图"用） */
 static void app_display(const char *l1, const char *l2)
 {
   app_display_ex(l1, l2, 0U, 0U, 0U);
 }
 
-/* ------------------------------- D4：按键事件 ----------------------------- */
-
-static touch_filter_t s_filter;    /* 滤波状态（放全局，不放任务栈上） */
-
-/* 按键事件队列：单生产者（keyTask）/ 单消费者（controllerTask）：
- * 一个写 head 一个写 tail，天然不需要加锁。 */
-static void app_key_push(uint8_t ev)
+/* 直接写屏：只在 calculator_app_init（调度器启动前、无并发）里用；
+ * 调度器启动之后，LCD 只允许 lcdTask 经 lcdQ 碰。 */
+static void app_lcd_direct(const char *l1, const char *l2)
 {
-  uint8_t next = (uint8_t)((s_app.key_head + 1U) & 0x0FU);
+  char t1[16], t2[16];
 
-  if (next == s_app.key_tail)
-  {
-    return;                      /* 队满：丢事件（正常操作不会满） */
-  }
-  s_app.key_fifo[s_app.key_head] = ev;
-  s_app.key_head = next;
+  app_fill16(t1, l1);
+  app_fill16(t2, l2);
+  lcd1602_write_frame(t1, t2, 0U, 0U, 0U);
 }
 
+/* ------------------------------- D4：按键事件 ----------------------------- */
+
+/* 滤波状态：只被 keyTask 读写（init 里清零），不跨任务共享、无需加锁。 */
+static touch_filter_t s_filter;
+
+/* 按键事件入队（keyTask 调用；队满丢弃——人手连按不会堆满 16 个） */
+static void app_key_push(uint8_t ev)
+{
+  key_evt_t e;
+
+  e.key = ev;
+  (void)osMessageQueuePut(s_key_q, &e, 0U, 0U);
+}
+
+/* 按键事件出队（controllerTask 调用）；*ev 取到键号返回 1，队空返回 0 */
 static uint8_t app_key_pop(uint8_t *ev)
 {
-  if (s_app.key_head == s_app.key_tail)
+  key_evt_t e;
+
+  if (osMessageQueueGet(s_key_q, &e, NULL, 0U) != osOK)
   {
-    return 0U;                   /* 队空 */
+    return 0U;                     /* 队空（或队列不可用） */
   }
-  *ev = s_app.key_fifo[s_app.key_tail];
-  s_app.key_tail = (uint8_t)((s_app.key_tail + 1U) & 0x0FU);
+  *ev = e.key;
   return 1U;
 }
 
@@ -289,7 +416,7 @@ static const uint8_t s_key_map[30] =
     '1',   '2',   '3',   '+',   '-',   '0',   '.',   'E',   APP_CH_FMT, APP_CH_EQ,
 };
 
-static char    s_expr[32];       /* 输入的表达式（C 字符串） */
+static char    s_expr[APP_EXPR_MAX]; /* 输入的表达式（C 字符串，容量见顶部 APP_EXPR_MAX） */
 static uint8_t s_expr_len;
 static uint8_t s_just_eval;      /* 刚按过 = ：下一次按数字要开新算式 */
 static uint8_t s_shift_active;   /* SHIFT 修饰态：下一次按键消费掉它 */
@@ -297,8 +424,16 @@ static uint8_t s_cmplx_mode;     /* 计算模式：0=COMP，1=CMPLX（MODE 菜�
 static uint8_t s_angle_rad;      /* 角度制：0=DEG（角度），1=RAD（弧度）；全局设置 */
 static uint8_t s_mode_menu;      /* 1 = 正在 MODE 设置菜单里 */
 static uint8_t s_fmt_menu;       /* 1 = 正在 FMT 精度设置里（模态：OK 退出） */
-static uint8_t s_frac_digits = 2U;  /* FMT：结果显示的小数位数（2 / 4 / 6） */
-static uint8_t s_cursor;            /* 编辑光标：表达式内索引（0 ~ s_expr_len，≤31） */
+static fmt_digits_t s_frac_digits = FMT_2;  /* FMT：结果显示的小数位数（2 / 4 / 6） */
+static uint8_t s_cursor;            /* 编辑光标：表达式内索引（0 ~ s_expr_len，≤63） */
+
+/* 求值在途状态（只有 controllerTask 访问，无需加锁）：
+ * 求值已异步化——按 = 只发请求，结果由 app_eval_poll 每周期取回。 */
+static uint8_t  s_req_seq;          /* 请求序号发生器（0 保留给"空闲"，不发给计算任务） */
+static uint8_t  s_pending_seq;      /* 在途请求序号；0 = 没有在途 */
+static uint32_t s_edit_seq;         /* 表达式"内容版本号"：内容变化才 ++（光标移动不算） */
+static uint32_t s_pending_edit;     /* 提交请求瞬间的版本号快照 */
+static uint32_t s_pending_tick;     /* 提交时刻（超时兜底用） */
 
 /* 撤销栈（BACK 键）：以"式子"为粒度——只在这些时刻记快照：
  *   ① 从"空 / 刚求值(结果)"状态开始输入第一个字符之前（记下式子起点的状态）；
@@ -308,7 +443,7 @@ static uint8_t s_cursor;            /* 编辑光标：表达式内索引（0 ~ s
  * 不是退格删字符（删单个字符请用 DEL 键）。
  * 满栈丢最旧的，保留最近 APP_UNDO_DEPTH 个式子状态。 */
 #define APP_UNDO_DEPTH 8U
-static char    s_undo[APP_UNDO_DEPTH][32];
+static char    s_undo[APP_UNDO_DEPTH][APP_EXPR_MAX];
 static uint8_t s_undo_len[APP_UNDO_DEPTH];
 static uint8_t s_undo_je[APP_UNDO_DEPTH];    /* 快照时的"刚求值"标志 */
 static uint8_t s_undo_count;
@@ -352,10 +487,11 @@ static uint8_t app_undo_pop(void)
     s_expr[k] = s_undo[s_undo_count][k];
   }
   s_just_eval = s_undo_je[s_undo_count];
+  s_edit_seq++;                    /* 表达式内容变了（求值在途判定用） */
   return 1U;
 }
 
-static void app_calc_evaluate(void);   /* 前置声明：app_calc_input 的求值分支要调用它 */
+static void app_eval_submit(void);     /* 前置声明：app_calc_input 的 '=' 分支要调用它 */
 
 /* SHIFT 副功能：激活态下按这些"主功能字符键" → 输入功能记号（多字符）而不是主字符。
  * 返回 NULL = 该键没有副功能（按主功能处理）。 */
@@ -376,6 +512,16 @@ static const char *app_shift_alt(uint8_t c)
     case '8': return (s_cmplx_mode != 0U) ? "@" : NULL;   /* 极坐标 a@θ：仅 COMPLX 模式 */
     default:  return NULL;
   }
+}
+
+/* ---------------- 编辑视图的显示窗口（两行 × 16 的滚动视图） ---------------- */
+
+/* 32 字符显示窗口的起点：跟随光标，保证光标始终可见。
+ * 光标 < 32（在前两屏内）→ 窗口从 0 起；否则窗口滚动到"光标钉在第二行末"。
+ * 纯函数（无状态），光标一动窗口自然跟着滚；窗口起点 ≤ 32，索引不越界。 */
+static uint8_t app_win_start(void)
+{
+  return (s_cursor >= 32U) ? (uint8_t)(s_cursor - 31U) : 0U;
 }
 
 /* MODE 设置菜单：第一行是菜单项，第二行显示当前两项设置 + "[OK]"退出提示。
@@ -411,19 +557,23 @@ static void app_mode_menu_show(void)
  * 保证 FMT 模态里"看得见"当前档位与退出方式。 */
 static void app_fmt_step(void)
 {
-  char l1[16];
-  char l2[16];
-  char t[12];
+  char    l1[16];
+  char    l2[16];
+  char    t[12];
+  uint8_t win = app_win_start();
+  uint8_t off;
 
-  s_frac_digits = (s_frac_digits == 2U) ? 4U : ((s_frac_digits == 4U) ? 6U : 2U);
+  s_frac_digits = (s_frac_digits == FMT_2) ? FMT_4 : ((s_frac_digits == FMT_4) ? FMT_6 : FMT_2);
   t[0] = 'F'; t[1] = 'I'; t[2] = 'X'; t[3] = ':'; t[4] = ' ';
-  t[5] = (char)('0' + s_frac_digits);
+  t[5] = (char)('0' + (int)s_frac_digits);
   t[6] = ' '; t[7] = '['; t[8] = 'O'; t[9] = 'K'; t[10] = ']';
   t[11] = '\0';
 
   for (uint8_t k = 0U; k < 16U; k++)
   {
-    l1[k] = (k < s_expr_len) ? s_expr[k] : ' ';
+    uint8_t idx = (uint8_t)(win + k);
+
+    l1[k] = (idx < s_expr_len) ? s_expr[idx] : ' ';
   }
   if (s_expr_len == 0U)
   {
@@ -431,23 +581,29 @@ static void app_fmt_step(void)
   }
   app_fill16(l2, t);
 
+  off = (uint8_t)(s_cursor - win);
   app_display_ex(l1, l2, 1U,
-                 (s_cursor >= 16U) ? 1U : 0U,
-                 (uint8_t)(s_cursor % 16U));
+                 (off >= 16U) ? 1U : 0U,
+                 (uint8_t)(off % 16U));
 }
 
-/* 编辑视图显示：表达式分两行铺满屏（每行 16 字符，最长 31 字符正好放下），
- * 硬件光标跟随编辑位置——按方向键移动时刷新这条路径即可"实时跟着动"。
- * 第二行没被表达式占满（len ≤ 16）时，显示调用者给的提示文字（彩蛋 / EXE to evaluate 等）。 */
+/* 编辑视图显示：表达式经 32 字符窗口分两行铺满屏（每行 16），
+ * 窗口跟随光标（见 app_win_start）——长式子下满屏滚动、光标钉在可见处。
+ * 第二行空着（len ≤ 16）时显示调用者给的提示文字（彩蛋 / EXE to evaluate 等）。 */
 static void app_calc_show_hint(const char *hint)
 {
-  char l1[16];
-  char l2[16];
+  char    l1[16];
+  char    l2[16];
+  uint8_t win = app_win_start();
+  uint8_t off;
 
   for (uint8_t k = 0U; k < 16U; k++)
   {
-    l1[k] = (k < s_expr_len) ? s_expr[k] : ' ';
-    l2[k] = ((uint8_t)(16U + k) < s_expr_len) ? s_expr[16U + k] : ' ';
+    uint8_t i1 = (uint8_t)(win + k);
+    uint8_t i2 = (uint8_t)(win + 16U + k);
+
+    l1[k] = (i1 < s_expr_len) ? s_expr[i1] : ' ';
+    l2[k] = (i2 < s_expr_len) ? s_expr[i2] : ' ';
   }
 
   if (s_expr_len <= 16U)
@@ -459,9 +615,10 @@ static void app_calc_show_hint(const char *hint)
     l1[0] = '0';                     /* 空闲主界面第一行显示 "0" */
   }
 
+  off = (uint8_t)(s_cursor - win);
   app_display_ex(l1, l2, 1U,
-                 (s_cursor >= 16U) ? 1U : 0U,
-                 (uint8_t)(s_cursor % 16U));
+                 (off >= 16U) ? 1U : 0U,
+                 (uint8_t)(off % 16U));
 }
 
 /* 主界面空闲态的花样提示（每次进入空闲态时随机选一条） */
@@ -500,8 +657,8 @@ static void app_calc_show(void)
 /* 向表达式缓冲追加一个字符（单字符与函数序列共用）：
  *   - 处于"空 / 刚求值"状态时的第一击 = 一段新输入的开始 → 记撤销点；
  *   - 刚求值状态下：运算符 / E 接着结果写，其它字符开新算式；
- *   - 满 31 字符后丢弃（给 '\0' 留位）。 */
-static void app_calc_put(uint8_t c)
+ *   - 满 APP_EXPR_MAX-1 字符后拒绝（返回 0），调用者据此提示 "! buf full"。 */
+static uint8_t app_calc_put(uint8_t c)
 {
   if ((s_expr_len == 0U) || (s_just_eval != 0U))
   {
@@ -530,7 +687,10 @@ static void app_calc_put(uint8_t c)
     s_expr_len++;
     s_cursor++;
     s_expr[s_expr_len] = '\0';
+    s_edit_seq++;                    /* 表达式内容变了（求值在途判定用） */
+    return 1U;
   }
+  return 0U;                         /* 缓冲满：拒绝本次输入 */
 }
 
 /* 追加一串字符（函数记号 "sin(" 等），整串算一个输入动作 */
@@ -538,7 +698,7 @@ static void app_calc_put_str(const char *s)
 {
   for (uint8_t i = 0U; s[i] != '\0'; i++)
   {
-    app_calc_put((uint8_t)s[i]);
+    (void)app_calc_put((uint8_t)s[i]);
   }
 }
 
@@ -637,6 +797,7 @@ static void app_calc_input(uint8_t c)
     if (s_expr_len > 0U)
     {
       app_undo_push();
+      s_edit_seq++;                    /* 清空也是内容变化 */
     }
     s_expr_len = 0U;
     s_expr[0] = '\0';
@@ -670,6 +831,7 @@ static void app_calc_input(uint8_t c)
       s_expr_len--;
       s_cursor--;
       s_expr[s_expr_len] = '\0';
+      s_edit_seq++;                  /* 表达式内容变了 */
     }
     app_calc_show();
     return;
@@ -714,25 +876,31 @@ static void app_calc_input(uint8_t c)
     return;
   }
 
-  /* 7) = 求值（求值成功时由 app_calc_evaluate 记撤销点并回填） */
+  /* 7) = 求值：这里只"发请求"（computeTask 负责算，结果经 resQ 回来、
+   *    app_eval_poll 负责应用）——控制任务不再被计算挡路 */
   if (c == APP_CH_EQ)
   {
-    app_calc_evaluate();
+    app_eval_submit();
     return;
   }
 
-  /* 8) 追加字符：put 内部负责"新输入段记撤销点"与 just_eval 状态机 */
-  app_calc_put(c);
+  /* 8) 追加字符：put 内部负责"新输入段记撤销点"与 just_eval 状态机；
+   *    缓冲区满会拒绝（返回 0）——明确提示，不再静默丢弃 */
+  if (app_calc_put(c) == 0U)
+  {
+    app_display(s_expr, "! buf full");
+    return;
+  }
 
   /* 9) 刷新显示 */
   app_calc_show();
 }
 
-/* 把 float 变成短字符串：整数部分 + frac 位小数（四舍五入；frac ∈ {2,4,6}）。
+/* 把 float 变成短字符串：整数部分 + frac 位小数（四舍五入；frac 取 FMT_2/FMT_4/FMT_6）。
  * 例（frac=2）：7 → "7.00"；-2.5 → "-2.50"；超范围/NaN → "Error" */
-static void app_format_float(float v, char *out, uint8_t out_size, uint8_t frac)
+static void app_format_float(float v, char *out, uint8_t out_size, fmt_digits_t frac)
 {
-  char     tmp[16];
+  char     tmp[FMT_INT_TMP_SIZE];
   uint8_t  n = 0U;
   uint8_t  j = 0U;
   uint8_t  neg = 0U;
@@ -748,12 +916,12 @@ static void app_format_float(float v, char *out, uint8_t out_size, uint8_t frac)
 
   /* 显示分辨率以下的浮点残渣归零（如 sin(30)+cos(60)-1 的 1e-8 噪声），
    * 免得上屏出现 "-0.00" 这类噪点 */
-  if ((v > -(0.5f / (float)scale)) && (v < (0.5f / (float)scale)))
+  if ((v > -(FMT_ZERO_EPS / (float)scale)) && (v < (FMT_ZERO_EPS / (float)scale)))
   {
     v = 0.0f;
   }
 
-  if (!(v > -1.0e9f && v < 1.0e9f))     /* NaN 和无穷也走这里 */
+  if (!(v > -FMT_RANGE_LIMIT && v < FMT_RANGE_LIMIT))   /* NaN 和无穷也走这里 */
   {
     const char *e = "Error";
     uint8_t k = 0U;
@@ -785,7 +953,7 @@ static void app_format_float(float v, char *out, uint8_t out_size, uint8_t frac)
   {
     tmp[n++] = (char)('0' + (ip % 10U));
     ip /= 10U;
-  } while (ip > 0U && n < 12U);
+  } while (ip > 0U && n < FMT_INT_DIGITS_MAX);
 
   if (neg && (j + 1U) < out_size)
   {
@@ -807,14 +975,15 @@ static void app_format_float(float v, char *out, uint8_t out_size, uint8_t frac)
 
 /* 把结果（实数或复数）变成显示字符串，返回长度。
  * 复数格式："a+bi" / "a-bi"；某个分量近似为 0 时省略（2@90 → "2.00i"）。
+ * frac：显示精度快照（由消息带入，不读全局——本函数在 computeTask 里跑）。
  * 近似阈值 = 半个显示单位，和 app_format_float 的归零口径一致。 */
-static uint8_t app_format_value(const calc_complex_t *v, char *r, uint8_t size)
+static uint8_t app_format_value(const calc_complex_t *v, char *r, uint8_t size, fmt_digits_t frac)
 {
-  float   eps = 0.5f;
+  float   eps = FMT_ZERO_EPS;
   uint8_t j = 0U;
   uint8_t show_im;
 
-  for (uint8_t i = 0U; i < s_frac_digits; i++)
+  for (uint8_t i = 0U; i < (uint8_t)frac; i++)
   {
     eps /= 10.0f;                      /* 0.5 / 10^frac */
   }
@@ -823,7 +992,7 @@ static uint8_t app_format_value(const calc_complex_t *v, char *r, uint8_t size)
   /* 实部：仅当它有存在感时输出 */
   if ((show_im == 0U) || !((v->real > -eps) && (v->real < eps)))
   {
-    app_format_float(v->real, r, size, s_frac_digits);
+    app_format_float(v->real, r, size, frac);
     while (r[j] != '\0')
     {
       j++;
@@ -836,7 +1005,7 @@ static uint8_t app_format_value(const calc_complex_t *v, char *r, uint8_t size)
 
   if (show_im != 0U)
   {
-    char  t[20];
+    char  t[FMT_IMAG_TMP_SIZE];
     float ai = v->imag;
     char  sc = '+';
 
@@ -845,7 +1014,7 @@ static uint8_t app_format_value(const calc_complex_t *v, char *r, uint8_t size)
       sc = '-';
       ai = -ai;
     }
-    app_format_float(ai, t, (uint8_t)sizeof(t), s_frac_digits);
+    app_format_float(ai, t, (uint8_t)sizeof(t), frac);
     if ((j + 1U) < size) { r[j++] = sc; }
     for (uint8_t i = 0U; t[i] != '\0' && (j + 1U) < size; i++)
     {
@@ -857,93 +1026,203 @@ static uint8_t app_format_value(const calc_complex_t *v, char *r, uint8_t size)
   return j;
 }
 
-/* '='：求值 → 显示 → 结果回填（供继续运算），模仿卡西欧的连续计算手感。
- * 【为什么在控制任务里直接算】s_expr 只有控制任务一个写者，
- * 不会出现两个任务同时改一个缓冲的竞态；求值器很小，栈够用。 */
-static void app_calc_evaluate(void)
+/* 求值状态码 → LCD 错误文案（第一行显示原表达式，第二行显示这里的文案，均 ≤16 字符） */
+static const char *app_err_text(calc_status_t st)
 {
-  calc_complex_t res;
-  calc_status_t  st;
-  char    r[48];
-  char    line1[17];
-  uint8_t rlen;
-  uint8_t fill;
+  switch (st)
+  {
+    case CALC_DIV_ZERO: return "! div by 0";
+    case CALC_DOMAIN:   return "! domain";
+    case CALC_BRACKET:  return "! bracket";
+    case CALC_BAD_OP:   return "! bad op";
+    case CALC_DEPTH:    return "! too deep";
+    case CALC_SYNTAX:
+    default:            return "! syntax";
+  }
+}
+
+/* '=' 的入口：组一份求值快照、投给 computeTask；不计算、不阻塞。
+ * 在途未回（s_pending_seq != 0）时忽略本次——求值只需毫秒级，基本撞不上。 */
+static void app_eval_submit(void)
+{
+  calc_req_t req;
 
   if (s_expr_len == 0U)
   {
     return;                              /* 空表达式：当没按过 */
   }
-
-  st = calculator_evaluate(s_expr,
-                           (s_angle_rad != 0U) ? CALC_ANGLE_RAD : CALC_ANGLE_DEG,
-                           s_cmplx_mode,
-                           (calc_complex_t){0},
-                           &res);
-
-  if (st == CALC_OK)
+  if (s_pending_seq != 0U)
   {
-    app_undo_push();      /* 记撤销点：按 BACK 可回到求值前的表达式 */
-    rlen = app_format_value(&res, r, (uint8_t)sizeof(r));
-
-    /* 显示行："=" + 结果（例 "=7.00"、"=-5.00+10.00i"）；
-     * 结果超过 15 字符时显示尾部（保住虚部信息） */
-    if (rlen <= 15U)
-    {
-      line1[0] = '=';
-      for (uint8_t i = 0U; i < rlen; i++)
-      {
-        line1[1U + i] = r[i];
-      }
-      line1[1U + rlen] = '\0';
-    }
-    else
-    {
-      uint8_t off = (uint8_t)(rlen - 15U);
-
-      for (uint8_t i = 0U; i < 15U; i++)
-      {
-        line1[i] = r[off + i];
-      }
-      line1[15] = '\0';
-    }
-
-    /* 回填：s_expr 变成结果字符串——复数带隐式乘法记号（"10.00i"），
-     * 引擎可直接再解析；超长结果按缓冲上限截断。
-     * just_eval=1 → 下一次按数字则开新算式（卡西欧式行为） */
-    fill = (rlen > (uint8_t)(sizeof(s_expr) - 1U)) ? (uint8_t)(sizeof(s_expr) - 1U) : rlen;
-    for (uint8_t i = 0U; i < fill; i++)
-    {
-      s_expr[i] = r[i];
-    }
-    s_expr[fill] = '\0';
-    s_expr_len = fill;
-    s_cursor = fill;      /* 结果显示/回填后，光标回到末尾 */
-    s_just_eval = 1U;
-
-    app_display(line1, "BACK=undo AC=clr");
+    return;                              /* 上一单还在算：忽略 */
   }
-  else if (st == CALC_DIV_ZERO)
+
+  for (uint8_t i = 0U; i <= s_expr_len; i++)
   {
-    app_display(s_expr, "! div by 0");
+    req.expr[i] = s_expr[i];             /* 含结尾 '\0' */
   }
-  else if (st == CALC_DOMAIN)
+
+  s_req_seq++;
+  if (s_req_seq == 0U)
   {
-    app_display(s_expr, "! domain");
+    s_req_seq = 1U;                      /* 0 保留给"空闲" */
+  }
+  req.serial    = s_req_seq;
+  req.angle_rad = s_angle_rad;
+  req.cmplx     = s_cmplx_mode;
+  req.frac      = (uint8_t)s_frac_digits;
+
+  if (osMessageQueuePut(s_req_q, &req, 0U, 0U) == osOK)
+  {
+    s_pending_seq  = req.serial;
+    s_pending_edit = s_edit_seq;
+    s_pending_tick = osKernelGetTickCount();
+  }
+}
+
+/* 应用一条配对成功的结果：成功 → 撤销点 + "=结果"显示 + 回填（继续运算）；
+ * 失败 → 按状态码显示错误文案（app_err_text）。只在 controllerTask 里跑。 */
+static void app_eval_apply(const calc_res_t *res)
+{
+  char    line1[17];
+  uint8_t rlen;
+  uint8_t fill;
+
+  if (res->status != CALC_OK)
+  {
+    app_display(s_expr, app_err_text(res->status));   /* 细分文案：! bracket / ! bad op / … */
+    return;
+  }
+
+  rlen = res->len;
+  app_undo_push();      /* 记撤销点：按 BACK 可回到求值前的表达式 */
+
+  /* 显示行："=" + 结果（例 "=7.00"、"=-5.00+10.00i"）；
+   * 结果超过 15 字符时显示尾部（保住虚部信息） */
+  if (rlen <= FMT_RESULT_LINE_MAX)
+  {
+    line1[0] = '=';
+    for (uint8_t i = 0U; i < rlen; i++)
+    {
+      line1[1U + i] = res->text[i];
+    }
+    line1[1U + rlen] = '\0';
   }
   else
   {
-    app_display(s_expr, "! syntax");
+    uint8_t off = (uint8_t)(rlen - FMT_RESULT_LINE_MAX);
+
+    for (uint8_t i = 0U; i < FMT_RESULT_LINE_MAX; i++)
+    {
+      line1[i] = res->text[off + i];
+    }
+    line1[FMT_RESULT_LINE_MAX] = '\0';
   }
+
+  /* 回填：s_expr 变成结果字符串——复数带隐式乘法记号（"10.00i"），
+   * 引擎可直接再解析；超长结果按缓冲上限截断。
+   * just_eval=1 → 下一次按数字则开新算式（卡西欧式行为） */
+  fill = (rlen > (uint8_t)(sizeof(s_expr) - 1U)) ? (uint8_t)(sizeof(s_expr) - 1U) : rlen;
+  for (uint8_t i = 0U; i < fill; i++)
+  {
+    s_expr[i] = res->text[i];
+  }
+  s_expr[fill] = '\0';
+  s_expr_len = fill;
+  s_cursor = fill;      /* 结果显示/回填后，光标回到末尾 */
+  s_just_eval = 1U;
+  s_edit_seq++;         /* 回填也是内容变化 */
+
+  app_display(line1, "BACK=undo AC=clr");
+}
+
+/* 每周期调用：取回结果并对号入座；绝不阻塞（0 超时）。
+ * 双判据：①序号匹配（正是在途的那单）②式子没被改过（s_edit_seq 未变）——
+ * 求值期间用户在拼新式子，就把旧结果静静地丢掉，别覆盖用户正在打的字。 */
+static void app_eval_poll(void)
+{
+  calc_res_t res;
+
+  if (s_pending_seq == 0U)
+  {
+    return;
+  }
+
+  while (osMessageQueueGet(s_res_q, &res, NULL, 0U) == osOK)
+  {
+    if (res.serial == s_pending_seq)
+    {
+      s_pending_seq = 0U;                /* 这一单结清 */
+      if (s_edit_seq == s_pending_edit)
+      {
+        app_eval_apply(&res);
+      }
+      break;                             /* 陈旧/迟到的结果不管 */
+    }
+  }
+
+  /* 兜底：computeTask 假死（或消息丢了）也不会把界面永久锁在"在途" */
+  if ((s_pending_seq != 0U) &&
+      ((osKernelGetTickCount() - s_pending_tick) > APP_EVAL_TIMEOUT_MS))
+  {
+    s_pending_seq = 0U;
+    app_display(s_expr, "! timeout");
+  }
+}
+
+/* ------------------------------ 开机硬件自检 ----------------------------- */
+
+/* 判据：连续读到"30 键全按下"（0x3FFFFFFF）是不可能的物理状态，
+ * 它意味着 SDO 恒为高——芯片无响应 / 接线故障的典型特征。
+ * 注意：全 0 是正常的"没按键"静默态，不能当故障！（否则每次开机都误报） */
+#define APP_SELFTEST_SAMPLES 5U
+#define APP_SELFTEST_GAP_MS  20U
+#define TTP229_ALL_KEYS      0x3FFFFFFFU
+
+static uint8_t s_hold_boot_page;    /* 1 = 自检异常页，保持到首次按键 */
+
+/* 返回 1 = 通过；0 = 异常。调度器启动前调用：用 HAL_Delay（TIM4 时基已工作）。 */
+static uint8_t app_touch_selftest(void)
+{
+  for (uint8_t i = 0U; i < APP_SELFTEST_SAMPLES; i++)
+  {
+    if (ttp229_read_physical() != TTP229_ALL_KEYS)
+    {
+      return 1U;                   /* 读到任意"正常"值（含全 0）即通过 */
+    }
+    if ((i + 1U) < APP_SELFTEST_SAMPLES)
+    {
+      HAL_Delay(APP_SELFTEST_GAP_MS);
+    }
+  }
+  return 0U;                       /* 连续 5 次全 1 → 判定故障 */
 }
 
 /* ============================== 6 个契约函数 ============================== */
 
-/* 在调度器启动之前被调用：只能做"初始化和硬件自检"，不能用 osDelay！ */
+/* 在调度器启动之前被调用：只能做"初始化和硬件自检"，不能用 osDelay！
+ * LCD 在这里直接写屏（此时无并发，还不用走显示队列）。 */
 void calculator_app_init(void)
 {
   lcd1602_init();                          /* LCD 初始化（内部用 HAL_Delay，没问题） */
   touch_filter_init(&s_filter);
-  app_display("MY  MINI  CASIO", "SOEI  2607  LYH"); /* TODO(你写)：改成你自己的欢迎语 */
+  CDC_RxInit();                            /* D3：建 USB 接收流缓冲（调度器启动前，静态创建） */
+  app_rtos_init();                         /* 建按键/显示队列（静态创建，不依赖调度器） */
+
+  if (app_rtos_ready() == 0U)
+  {
+    app_lcd_direct("RTOS ERR", "check queues");
+    for (;;) { }                           /* 对象没建起来：停机报错，别带着坏队列跑 */
+  }
+
+  if (app_touch_selftest() != 0U)
+  {
+    app_lcd_direct("MY  MINI  CASIO", "SOEI  2607  LYH");   /* 自检通过：欢迎页 */
+  }
+  else
+  {
+    app_lcd_direct("TOUCH ERR", "check TTP229 wire");       /* 连续全 1 = 故障特征 */
+    s_hold_boot_page = 1U;                                  /* 错误页保持到首次按键 */
+  }
 }
 
 /* 心跳任务：证明调度器活着、你的程序没被玩死 */
@@ -972,33 +1251,19 @@ void calculator_key_task(void)
   }
 }
 
-/* 显示任务：全工程唯一允许调用 lcd1602_* 的任务（所以它不需要抢锁） */
+/* 显示任务：全工程唯一允许调用 lcd1602_* 的任务。
+ * 阻塞等显示帧（事件驱动，不再 100ms 轮询）；等到一帧就慢写整屏。 */
 void calculator_lcd_task(void)
 {
-  char     l1[16], l2[16];
-  uint8_t  cur_on, cur_row, cur_col;
+  lcd_frame_t f;
 
   for (;;)
   {
-    if (s_app.dirty != 0U)
+    if (osMessageQueueGet(s_lcd_q, &f, NULL, osWaitForever) == osOK)
     {
-      /* 用最短的临界区把快照（含光标位置）拷出来 */
-      uint32_t pm = app_lock();
-      for (uint8_t i = 0U; i < 16U; i++)
-      {
-        l1[i] = s_app.line1[i];
-        l2[i] = s_app.line2[i];
-      }
-      cur_on  = s_app.cur_on;
-      cur_row = s_app.cur_row;
-      cur_col = s_app.cur_col;
-      s_app.dirty = 0U;
-      app_unlock(pm);
-
-      /* 慢操作放在临界区外面；带硬件光标（编辑视图显示，方向键移动即这里跟进） */
-      lcd1602_write_frame(l1, l2, cur_on, cur_row, cur_col);
+      /* 带硬件光标（编辑视图显示，方向键移动即这里跟进） */
+      lcd1602_write_frame(f.line1, f.line2, f.cur_on, f.cur_row, f.cur_col);
     }
-    osDelay(APP_LCD_PERIOD_MS);
   }
 }
 
@@ -1008,6 +1273,7 @@ void calculator_controller_task(void)
   uint8_t  ev;
   uint32_t t0 = osKernelGetTickCount();   /* 开机时刻 ≈ 本任务第一次运行 */
   uint8_t  intro_done = 0U;
+  uint32_t t_hwm = 0U;                    /* 上次栈余量采样时刻 */
 
   for (;;)
   {
@@ -1015,6 +1281,11 @@ void calculator_controller_task(void)
 
     while (app_key_pop(&ev))        /* D4/D5：按键事件 → 输入 */
     {
+      if (s_hold_boot_page != 0U)
+      {
+        s_hold_boot_page = 0U;      /* 自检异常页：首次按键后放行主界面 */
+        app_calc_show();
+      }
       uint8_t ch = s_key_map[ev];
       if (ch != 0xFFU)              /* 0xFF = 该键未映射，忽略 */
       {
@@ -1022,23 +1293,64 @@ void calculator_controller_task(void)
       }
     }
 
-    /* 欢迎页展示 APP_SPLASH_MS 后自动进入主界面（"0" + "ready"）。
-     * 欢迎期间若有按键，app_calc_input 已刷过屏；这里补刷一次只是重显当前状态，无害。 */
-    if ((intro_done == 0U) && ((osKernelGetTickCount() - t0) >= APP_SPLASH_MS))
+    /* 欢迎页展示 APP_SPLASH_MS 后自动进入主界面（"0" + 随机彩蛋）。
+     * 自检异常页（s_hold_boot_page）期间不自动切，保持错误提示可见。 */
+    if ((s_hold_boot_page == 0U) && (intro_done == 0U) &&
+        ((osKernelGetTickCount() - t0) >= APP_SPLASH_MS))
     {
       intro_done = 1U;
       app_calc_show();
+    }
+
+    app_eval_poll();                /* 收求值结果 / 超时兜底（非阻塞） */
+
+    /* 栈余量采样（调试用，见 g_stack_hwm 说明） */
+    if ((osKernelGetTickCount() - t_hwm) >= APP_HWM_PERIOD_MS)
+    {
+      t_hwm = osKernelGetTickCount();
+      g_stack_hwm[0] = osThreadGetStackSpace(calculatorTaskHandle);
+      g_stack_hwm[1] = osThreadGetStackSpace(controllerTaskHandle);
+      g_stack_hwm[2] = osThreadGetStackSpace(lcdTaskHandle);
+      g_stack_hwm[3] = osThreadGetStackSpace(KeyTaskHandle);
+      g_stack_hwm[4] = osThreadGetStackSpace(defaultTaskHandle);
     }
 
     osDelay(APP_CTRL_PERIOD_MS);
   }
 }
 
-/* 计算任务：栈最大（2048 B），高级功能留到这里 */
+/* 计算任务：阻塞等求值请求 → 求值 + 格式化（纯计算，不碰任何 UI 状态）→ 回结果。
+ * 递归下降解析的重活全在这里跑；栈 3328B 就是留给它的（上界公式见 engine 的
+ * CALC_MAX_DEPTH 注释）。格式化用请求里的 frac 快照，与 UI 状态完全解耦。 */
 void calculator_compute_task(void)
 {
+  calc_req_t     req;
+  calc_res_t     res;
+  calc_complex_t v;
+
   for (;;)
   {
-    osDelay(20U);
+    if (osMessageQueueGet(s_req_q, &req, NULL, osWaitForever) != osOK)
+    {
+      continue;                    /* 系统错误：下轮再来 */
+    }
+
+    res.serial = req.serial;
+    res.status = calculator_evaluate(req.expr,
+                                     (req.angle_rad != 0U) ? CALC_ANGLE_RAD : CALC_ANGLE_DEG,
+                                     req.cmplx,
+                                     (calc_complex_t){0},
+                                     &v);
+    if (res.status == CALC_OK)
+    {
+      res.len = app_format_value(&v, res.text, (uint8_t)sizeof(res.text), (fmt_digits_t)req.frac);
+    }
+    else
+    {
+      res.len = 0U;
+      res.text[0] = '\0';
+    }
+
+    (void)osMessageQueuePut(s_res_q, &res, 0U, 0U);
   }
 }

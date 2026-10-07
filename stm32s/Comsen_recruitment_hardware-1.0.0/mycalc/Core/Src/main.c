@@ -88,7 +88,7 @@ const osThreadAttr_t lcdTask_attributes = {
 };
 /* Definitions for calculatorTask */
 osThreadId_t calculatorTaskHandle;
-uint32_t claculatorTaskBuffer[ 512 ];
+uint32_t claculatorTaskBuffer[ 832 ];
 osStaticThreadDef_t claculatorTaskControlBlock;
 const osThreadAttr_t calculatorTask_attributes = {
   .name = "calculatorTask",
@@ -96,7 +96,7 @@ const osThreadAttr_t calculatorTask_attributes = {
   .cb_size = sizeof(claculatorTaskControlBlock),
   .stack_mem = &claculatorTaskBuffer[0],
   .stack_size = sizeof(claculatorTaskBuffer),
-  .priority = (osPriority_t) osPriorityLow,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for controllerTask */
 osThreadId_t controllerTaskHandle;

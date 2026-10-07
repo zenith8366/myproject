@@ -15,9 +15,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### 文档与标准
 
-- 根目录 `README.md` 是招新题目与要求的**唯一标准文档：只读，不允许修改**；`mycalc/README.md` 为示例说明，同样只读。修订其它任何文档时必须与 README 保持一致。
+- 根目录 `README.md` 是招新题目与要求的**唯一标准文档：只读，不允许修改**；`mycalc/README.md` 是用户自写的**工程 README（提交物之一，可随代码维护）**——早期误当作示例说明，2026-10-07 已确认性质并更新。修订其它任何文档时必须与根 README 保持一致。
 - 参与者的工作文档都在 `学习知识/` 目录：《七天学习计划.md》（七天执行手册）、《函数清单.md》（自定义函数总表）、《项目结构图.md》（文件地图与调用关系图），以及《阶段二.md》~《阶段六.md》（各阶段基础知识讲解：含 STM32/FreeRTOS/计算器基础原理与拓展知识，写作体例为"专业说法 + 大白话解释"，内容已按本工程实际接口核对过）；可随进度维护。
-- 本副本的参与路线（已选定）：保留示例的 FreeRTOS 五任务架构，按 README 规则做**同名替换**（用户的明确要求，不要单文件自定义架构）——`mycalc/User/calculator_app.c`↔libcalculator_app.a、`User/touch_filter.c`↔libtouch_filter.a、`User/calculator_engine.c`↔libcalculator_engine.a（liblcd1602/libtp229 继续用库）；先完成任务 2/3/4、冲刺任务 5；执行细节以《七天学习计划.md》为准。
+- 本副本的参与路线（已选定）：保留示例的 FreeRTOS 五任务架构，按 README 规则做**同名替换**（用户的明确要求，不要单文件自定义架构）——`mycalc/User/calculator_app.c`↔libcalculator_app.a、`User/touch_filter.c`↔libtouch_filter.a、`User/calculator_engine.c`↔libcalculator_engine.a（liblcd1602/libtpp229 继续用库）；先完成任务 2/3/4、冲刺任务 5；执行细节以《七天学习计划.md》为准。**2026-10-07 状态**：三个模块的同名替换均已完成，并据 `mycalc/不足.md` 做过一轮 RTOS 解耦重构（4 条静态消息队列 + xStreamBuffer 接收 + 求值搬入 computeTask + 错误码细化 + 嵌套深度上限 + 开机自检）；重构后已过编译与 PC 端引擎断言（66/66），**上板整机复验待做**。详见 `mycalc/README.md` 第四节与《函数清单.md》§3.4。
 - README 最新「## 提交」章（2026-10-04 更新）要求：提交 = ①演示视频（1~3 分钟）②完整可编译工程 + 工程自己的 README.md ③`REPORT.md`。**`REPORT.md` 必须由用户本人手写，严禁 AI 代写**（README 原文：AI 生成内容"视同无效提交并取消资格"）；其余开发与调试过程 README 鼓励 AI 辅助。提交渠道：fork 仓库 QQ 发地址 / 压缩包 QQ 私发（≤100MB，命名 `Comsen招新-硬件组-[年级]-[姓名]`）。
 
 ## 构建
@@ -34,7 +34,7 @@ cmake --build mycalc/build/Debug
 
 - 编译器：`D:\Arm\GNU Toolchain mingw-w64-i686-arm-none-eabi\bin\arm-none-eabi-gcc.exe`（Arm GNU Toolchain 15.3.1，已在 PATH）。`lib/*.a` 由 Arm GNU Toolchain 15.2 构建，ABI 兼容。
 - 产物：`mycalc/build/<Config>/software.elf`、`.hex`、`.bin`、`.map`（hex/bin 由 `CMakeLists.txt` 的 POST_BUILD 生成）。
-- 实测占用（`arm-none-eabi-size`，2026-10-04）：Debug FLASH 44236 B (67.5%) / RAM 13192 B (64.4%)；Release FLASH 39848 B (60.8%) / RAM 13184 B (64.4%)。**Flash 只有 64 KiB，余量不多。**
+- 实测占用（`--print-memory-usage`，2026-10-07，RTOS 重构后）：Debug FLASH 51488 B (78.6%) / RAM 16608 B (81.1%)；Release FLASH 44848 B (68.4%) / RAM 16600 B (81.1%)。**Flash 只有 64 KiB，余量已不多；再加功能优先控制 Debug 增量或做减法。**
 - 用 CubeMX 打开 `mycalc/software.ioc` 可查看或重新生成配置。
 
 ## 无自动化测试
@@ -54,15 +54,15 @@ MCU 为 STM32F103C8T6（Cortex-M3，64 KiB Flash / 20 KiB RAM），HSE 8 MHz × 
 
 ### FreeRTOS
 
-CMSIS-RTOS v2 接口，**全部静态分配**：5 个任务的栈和 TCB 都是 `main.c` 里的静态数组，队列由 `calculator_app_init()` 在 `RTOS_QUEUES` 段以静态方式创建。`configTOTAL_HEAP_SIZE` 仅 1024 字节（heap_4），`configUSE_MALLOC_FAILED_HOOK = 1`，其 hook 直接 `NVIC_SystemReset()`——内存不足表现为复位而非报错。
+CMSIS-RTOS v2 接口，**全部静态分配**：5 个任务的栈和 TCB 都是 `main.c` 里的静态数组（computeTask 栈 3328 B、优先级 Normal——求值搬入后的规格，参数已同步进 `software.ioc`），消息队列由 `calculator_app_init()` 静态创建。`configTOTAL_HEAP_SIZE` 仅 1024 字节（heap_4）；`configUSE_MALLOC_FAILED_HOOK = 1` 与 `configCHECK_FOR_STACK_OVERFLOW = 1`，两个 hook 都直接 `NVIC_SystemReset()`——内存不足/栈溢出表现为复位而非报错。
 
-`main.c` 里每个任务函数体都只是转发到库函数：`KeyTask → calculator_key_task`（osPriorityHigh）、`defaultTask → calculator_heartbeat_task`、`lcdTask → calculator_lcd_task`、`controllerTask → calculator_controller_task`、`calculatorTask → calculator_compute_task`。任务的真实逻辑在 `libcalculator_app.a` 内。
+`main.c` 的任务转发函数调 `calculator_xxx_task()`；自 D2 起由用户自写的 `User/calculator_app.c` 提供同名实现（libcalculator_app.a 已从链接列表移除），不再是库内逻辑。
 
-数据流：`ttp229_read_physical()` 原始 30 位位图 → `touch_filter_update()`（约定每 10 ms 调一次）→ `touch_model_classify()` → 控制任务 → 计算队列 → `calculator_evaluate()` → 显示队列 → LCD 任务。
+现状数据流（2026-10-07 解耦后）：`ttp229_read_physical()` → `touch_filter_update()`（10 ms 周期）→ keyTask 投 `keyQ` → controllerTask 输入状态机 → 按 `=` 投 `reqQ` → computeTask 求值 + 格式化 → `resQ` → controllerTask 应用（回填/错误提示）→ 显示帧投 `lcdQ` → lcdTask 写屏；USB 接收走静态 xStreamBuffer（中断 `SendFromISR` 写、controllerTask 0 超时读）。**约束：USB 中断优先级（`USB_LP_CAN1_RX0_IRQn = 5`）不得调小**（须 ≥ `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY`，否则破坏流缓冲临界区）。
 
-### USB CDC 是被屏蔽的
+### USB CDC
 
-`.ioc` 里配了 USB Device CDC（PA11/PA12，48 MHz 时钟源），但 `main.c` 用 `#define MX_USB_DEVICE_Init() ((void)0)` 把初始化架空了——**示例默认不启动 USB**，招新第 2 项任务（串口显示）需要自行解除。USB 配置保留给单独的硬件自检镜像使用，改动时不要破坏它。
+`.ioc` 里配了 USB Device CDC（PA11/PA12，48 MHz 时钟源）。示例曾用 `#define MX_USB_DEVICE_Init() ((void)0)` 屏蔽初始化——**本副本已解除**（任务 2 需要，main.c USER CODE 2 调用）。`.ioc` 的 USB 配置保留给单独的硬件自检镜像使用，改动时不要破坏它。
 
 `USB_DEVICE/App/usbd_cdc_if.c` 里有一处项目自己的改动：`CDC_Receive_FS` 中做了大小写不敏感的 `"EXPORT"` 匹配，置位 volatile 标志，并提供 `CDC_TakeExportRequest_FS()` 供上层取走（已在 `usbd_cdc_if.h` 声明）。本镜像中没有任何调用方。
 
@@ -91,4 +91,5 @@ CMSIS-RTOS v2 接口，**全部静态分配**：5 个任务的栈和 TCB 都是 
 - `CMakeLists.txt`：链接 6 个 `.a`、POST_BUILD 生成 HEX/BIN、Debug 追加 `-Og`（`gcc-arm-none-eabi.cmake` 里默认的 `-O0` 会让镜像**超过 64 KiB 链接失败**，这个覆盖不能删）。
 - `stm32f103c8tx_flash.ld`：`_Min_Heap_Size = 0x0`（关掉 newlib 堆，RAM 留给 FreeRTOS 静态栈），`_Min_Stack_Size = 0x400`。
 - `cmake/gcc-arm-none-eabi.cmake`：编译选项为 `-Wall -Wextra -Wpedantic`，各配置的 flags 用 `CACHE ... FORCE` 设置；链接参数含 `--specs=nano.specs`、`-Wl,--gc-sections`、`--print-memory-usage`。
-- `Core/Src/freertos.c` 中只有 `vApplicationMallocFailedHook`，没有业务代码。
+- `Core/Src/freertos.c` 中只有两个 hook（`vApplicationMallocFailedHook`、`vApplicationStackOverflowHook`，均在 USER CODE 区），没有业务代码。
+- `software.ioc`：任务参数（computeTask 832 字 / Normal）与 `configCHECK_FOR_STACK_OVERFLOW=1` 已写进 .ioc，CubeMX 重新生成不会丢；**今后改任务栈/优先级要同时改 .ioc**（它才是 CubeMX 的输入）。
