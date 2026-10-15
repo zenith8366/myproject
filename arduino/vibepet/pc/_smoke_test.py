@@ -34,7 +34,7 @@ HOOK_INPUT_PERM = {
     "session_id": "test-session",
     "hook_event_name": "PermissionRequest",
     "tool_name": "Write",
-    "tool_input": {"file_path": "E:/myproject/vibepet/临时文件.txt", "content": "hello"},
+    "tool_input": {"file_path": "E:/vibepet-test/临时文件.txt", "content": "hello"},
 }
 
 

@@ -31,7 +31,7 @@
 **关闭**（临时禁用某个或全部 hook）：把对应 `command` 的值前面加 `# `，例如
 
 ```json
-"command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+"command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
 ```
 
 为什么可以这么注释：hook 的 `command` 值是**交给 shell 执行的**，而 shell 认 `#`。
@@ -69,21 +69,17 @@ VibePet 的降级策略是**拿不准就拒绝**。daemon 不在时，`PreToolUs
 顺带一提：**打开串口会让 UNO 复位一次**（USB 转串口芯片拉 DTR），约 2 秒后进入固件。
 这不是故障，daemon 会等它启动完再把当前画面补发过去。
 
-### 3. 与 Clawd on Desk 并存（已确认不冲突，2026-10-01 实测）
+### 3. 与 Clawd on Desk 并存（审批链交互待验证）
 
-用户级配置 `~/.claude/settings.json` 里挂着 Clawd on Desk 的一整套 hook，事件几乎完全重叠。
-**结论：两者可以并存**。原理与实测：
+用户级配置 `~/.claude/settings.json` 里挂着 Clawd on Desk 的一整套 hook，其中有一个
+无工具 matcher、超时 600 秒的 `PermissionRequest` HTTP hook。Claude Code 会并行运行所有
+匹配的 hook；因此 Bash 的 `PreToolUse` 与 Clawd 的 `PermissionRequest` 不是同一条决策路径，
+但非 Bash 权限请求会同时进入 VibePet 和 Clawd 的 `PermissionRequest`。
 
-1. **Clawd 的状态类 hook 全部带 `"async": true`** —— 后台执行、不阻塞、不产生决策，
-   只是给自己的界面推状态；VibePet 的审批事件（`PreToolUse` / `PermissionRequest`）
-   才是做决策的那个。
-2. Clawd 另有一个 `PermissionRequest` 的 HTTP hook（`127.0.0.1:23333/permission`，
-   timeout 600 秒）。它与 VibePet 的 `PermissionRequest` **并行执行、结果合并**，
-   合并规则是「最严格者胜」（deny > defer > ask > allow）——任何一边拒绝，操作都不会放行。
-   **实测**：Clawd 应用关闭 / 打开两种状态下各触发一次权限请求，VibePet 侧均为数秒内
-   出结果（daemon 不在 → 快速 deny），没有出现「等它 600 秒超时」的拖慢。
-   若日后发现它造成等待或干扰，处理办法是注释掉那条用户级 HTTP hook —— 但那属于
-   **全局改动，动手前必须先跟用户确认**（见下方提醒）。
+Clawd 的状态类异步 hook 不会阻塞 VibePet。此前的 Clawd 并存测试是在 VibePet daemon 不运行时
+进行的，只验证了 VibePet 快速返回 `deny`；它没有验证设备在线时按下 VibePet 按钮后，Clawd 的
+HTTP hook 是否也会及时结束。因此**不能据此确认两条权限审批链不会相互等待或影响结果**。
+启用设备审批前，应在设备在线时分别测试 Clawd 开启和关闭的情况，并确认两边的请求都能结束。
 
 > ⚠️ **改动范围提醒**：全局（用户级）配置影响用户所有项目与 Clawd 等其他工具，
 > **不要代替用户改动它**。VibePet 的 hook 只写在**本目录**的 `settings.json` 里，
@@ -107,7 +103,7 @@ VibePet 的降级策略是**拿不准就拒绝**。daemon 不在时，`PreToolUs
 | 离线用例 | ✅ 两种事件的决策格式各自输出、不串（`_smoke_test.py` 10/10 通过） |
 | 事件触发 | ✅ 需要权限的文件写入触发了 `PermissionRequest`，VibePet 收到并处理 |
 | 降级路径 | ✅ daemon 不在 → 数秒内出 `deny`，链路上没有分钟级等待 |
-| Clawd 并存 | ✅ Clawd 关闭 / 打开两种状态下均无拖慢（见上节） |
+| Clawd 并存 | ⚠️ 已验证 daemon 离线时能快速 `deny`；设备在线、两条审批链同时等待时的行为未验证 |
 | 交互类工具 | ⚠️ `AskUserQuestion` / `ExitPlanMode` 也会被接上设备卡；daemon 不在时会被 deny。hook 的 `allow` 不足以跳过它们的原生交互 —— 行为待真机联调确认，可能需要豁免 |
 
 **按钮位置提醒**：实测发现，接在 **D2** 上的按钮是「批准」（屏幕显示**已批准**），
@@ -117,5 +113,5 @@ VibePet 的降级策略是**拿不准就拒绝**。daemon 不在时，`PreToolUs
 
 ## 这个文件为什么放在这里
 
-`settings.json` 的**项目级**配置会与用户级**合并**（不是替换），所以 VibePet 的 hook 只在你
-工作于 `E:\myproject\vibepet` 时才会被加载，切到其他项目不受影响。
+`settings.json` 的**项目级**配置会与用户级**合并**（不是替换），所以 VibePet 的 hook 只在
+Claude Code 以包含本 `.claude` 目录的项目根目录运行时加载，切到其他项目不受影响。

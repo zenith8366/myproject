@@ -61,7 +61,11 @@ def wait_for_pending(timeout=5):
 def approve_async(tool_input):
     """在后台线程发起一次审批，返回 (thread, result_holder)。"""
     holder = {}
-    hook_input = {"tool_name": "Bash", "tool_input": tool_input}
+    hook_input = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": tool_input,
+    }
 
     def run():
         try:

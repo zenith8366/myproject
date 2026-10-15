@@ -3,7 +3,7 @@
 把 AI 编程助手的工作状态搬到桌面上。
 
 > **当前状态**：本版是 **v3.0（USB 有线版）**，设计与代码都已经落地 ——
-> 固件能编译（Flash 85%、RAM 62%，零警告），电脑端测试 44 例、协议内核离线测试
+> 固件能编译（Flash 约 92%、RAM 62%，零警告），电脑端测试 47 例、协议内核离线测试
 > 55 例全部通过。**固件已烧进板子跑起来了**，正在做真机联调。
 > 进度详见文末的[项目状态](#项目状态)。v2.0 的无线（BLE）路线已放弃（原因见设计文档 1.2）。
 
@@ -46,6 +46,8 @@ VibePet 是一个放在桌上的小设备。它用一根 USB 线连到你的电�
 | `DONE` | 青 | 这一轮任务完成 |
 | `ERROR` | 红 | 工具执行出错，下方显示错误信息 |
 | `LOST` | 橙 | 设备收不到电脑的心跳，连接断了 |
+
+普通状态的图标动效只刷新标题与正文之间的区域，命令摘要和说明文字会保留在原位；审批边框沿屏幕四边闪烁，`LOST` 信号动效则在大字上方。固件编译时会检查图标区不与标题、正文相交。
 
 `LOST` 是设备自己判断的：电脑端每秒发一次心跳，超过 5 秒收不到就自动切换，
 所以设备**不会**卡在某个过期状态上骗你。心跳恢复后设备会自己切回失联前的画面，
@@ -210,7 +212,7 @@ CLI="/d/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
 | `--build-path …/build` | **不能省**：不带它时上面那条 `-D` 会静默失效（编译器的缓存机制会命中一份没带参数的旧结果），而 RAM 数字是唯一的判据 |
 
 > **怎么确认参数真的生效了**：看编译输出里的那两行。带参数时应该接近
-> `Global variables use 1282 bytes`；如果显示 `1090 bytes`，说明 `-D` 没生效，
+> `Global variables use 1286 bytes`；如果显示 `1090 bytes`，说明 `-D` 没生效，
 > 加回 `--build-path` 再编一次。
 
 ### 或者：用 Arduino IDE 的「上传」按钮（更省事）
@@ -247,35 +249,44 @@ pip install pyserial
 
 ### 第四步：配置 Claude Code Hook
 
-编辑你的 Claude Code 配置文件 `.claude/settings.json`，把 VibePet 挂到这些事件上
-（把 `<绝对路径>` 换成你实际存放本项目的位置）：
+编辑项目目录下的 `.claude/settings.json`，把 VibePet 挂到这些事件上。
+配置使用 `${CLAUDE_PROJECT_DIR}` 定位脚本，不需要写死仓库绝对路径：
 
 ```json
 {
   "hooks": {
-    "PreToolUse":       [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
-    "PermissionRequest":[{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
-    "PostToolUse":      [{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
-    "Stop":             [{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
-    "SessionStart":     [{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}],
-    "SessionEnd":       [{"hooks": [{"type": "command", "command": "python <绝对路径>/pc/hook_client.py"}]}]
+    "PreToolUse": [{"matcher":"Bash","hooks":[{"type":"command","shell":"bash","timeout":150,"command":"python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""}]}],
+    "PermissionRequest": [{"hooks":[{"type":"command","shell":"bash","timeout":150,"command":"python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""}]}],
+    "PostToolUse": [{"hooks":[{"type":"command","shell":"bash","timeout":5,"command":"python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""}]}],
+    "UserPromptSubmit": [{"hooks":[{"type":"command","shell":"bash","timeout":5,"command":"python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""}]}],
+    "Stop": [{"hooks":[{"type":"command","shell":"bash","timeout":5,"command":"python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""}]}],
+    "SessionStart": [{"hooks":[{"type":"command","shell":"bash","timeout":5,"command":"python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""}]}],
+    "SessionEnd": [{"hooks":[{"type":"command","shell":"bash","timeout":5,"command":"python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""}]}],
+    "SubagentStop": [{"hooks":[{"type":"command","shell":"bash","timeout":5,"command":"python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""}]}],
+    "PreCompact": [{"hooks":[{"type":"command","shell":"bash","timeout":5,"command":"python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""}]}]
   }
 }
 ```
 
-Windows 路径建议用正斜杠（`E:/myproject/vibepet/pc/hook_client.py`），JSON 里不用转义。
+`PreToolUse` 的 `Bash` matcher 让每次 Bash 调用都经过物理审批；无 matcher 的
+`PermissionRequest` 则只在 Claude Code 需要权限决定时触发，覆盖非 Bash 工具。
+状态事件只上报屏幕状态，不要求按键。
 
-`"matcher": "Bash"` 决定哪些工具需要物理审批。想改成所有工具都审批就用 `"*"`，
-想只审批特定命令可以在 `"Bash(...)"` 里写匹配规则。
-
-**两条审批链**：`PreToolUse` 管 Bash 命令；`PermissionRequest`（没有 matcher = 所有工具）
-管「其他会弹权限窗的操作」——比如修改工作区外的文件。两者都会把审批送到设备上，
-你按按钮的效果完全一样。
+> **并行 Hook 提醒**：如果用户级配置也注册了 `PermissionRequest`（例如 Clawd on Desk），
+> 两个匹配 Hook 会同时运行。请先按 `.claude/README.md` 的说明确认并行审批行为，再启用。
 
 > **⚠️ 挂上 Hook 之后，一定要先启动 daemon 再使用 Claude Code。**
 > daemon 不在时，VibePet 会按安全策略拒绝所有匹配的工具调用——这是有意设计的
 > （宁可拒绝，也不放过未经审批的操作），但如果你忘了启动它，会觉得 Claude Code 坏了。
+
+### 在 Codex 中启用
+
+Codex Hook 配置位于 `arduino/vibepet/.codex/hooks.json`，因此只会在 Codex 会话的
+工作目录设为 VibePet 目录或其子目录时加载；仓库其他目录不会加载这组 Hook。它只在
+`PermissionRequest` 时等待实体审批按钮，没有配置 `PreToolUse`，因此普通工具调用不会
+每次都弹审批卡。先启动 daemon，再在 Codex 桌面版以 VibePet 目录作为工作目录打开会话，
+运行 `/hooks` 检查并信任当前配置。Codex 会按配置内容记录信任，配置后续有变化时需要
+重新审核；daemon 不可达或等待超时会按安全策略拒绝审批。
 
 ## 日常使用
 
@@ -448,13 +459,13 @@ g++ -I tools/proto_test -I firmware/VibePet_UNO tools/test_proto.cpp -o /tmp/pro
 | 电脑端审批逻辑（`hook_client.py` + `Bridge`） | ✅ 已实现（与传输方式无关，从 v2.0 原样保留） |
 | 电脑端串口传输（`SerialTransport`） | ✅ 已实现，9 项测试通过（注入假串口，不需要真设备） |
 | 协议解析内核（`vibepet_proto.h`） | ✅ 已实现，离线测试 55 例通过 |
-| UNO 固件（`firmware/VibePet_UNO/`） | ✅ 已实现，**编译零警告**（Flash 85% / RAM 62%）—— **尚未在真机上跑通** |
+| UNO 固件（`firmware/VibePet_UNO/`） | ✅ 已实现，六态动效已实机显示，正文空间确认（Flash 约 92% / RAM 62%）；长中文折行、缺字框待检查 |
 | 中文字库工具链（`tools/gen_cn_font.py`） | ✅ 已实现（390 字、约 9KB），黄金字形自检通过 |
 | 硬件链路（UNO + 1.77" 屏） | ✅ 屏幕已验证点亮 |
 | 外壳 / 3D 打印 | ⬜ 未开始 |
 
 **现在能做的**：跑上面的测试验证全部逻辑；按「第二步」把固件烧进板子。
-**还没做的**：真机端到端联调 —— 串口收发、按钮回传、中文在屏幕上的实际观感、看门狗失联恢复。
+**还没做的**：新动效版本的真机观感、真机端到端联调 —— 串口收发、按钮回传、中文折行与缺字显示、看门狗失联恢复。
 
 ## 深入了解
 

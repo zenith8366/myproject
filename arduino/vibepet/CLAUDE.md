@@ -6,13 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **设计文档 v3.0**（`VibePet —— AI 编程助手物理状态显示与审批终端（USB 有线版）v3.0.md`，位于仓库根目录，文件名含中文、空格与全角破折号，引用时务必加引号）。它是**唯一权威规格**，开始任何实现前先读它。
 - **已实现并有验证**（2026-09-25）：
-  - `firmware/VibePet_UNO/`：`VibePet_UNO.ino`（857 行）+ `vibepet_proto.h`（协议内核）+ `cn_font.h`（生成物）。**编译零警告**，Flash 27636/32256（85%）、RAM 1282/2048（62%）
+  - `firmware/VibePet_UNO/`：UNO 固件、协议内核与字库。**编译零警告**，Flash 29784/32256（约 92%）、RAM 1286/2048（62%）
   - `tools/gen_cn_font.py`：字库裁剪工具，`--verify` 黄金字形自检通过（`中` / `A` 逐位一致）
   - `tools/test_proto.cpp`：固件端**离线测试（55 例：协议解析 + 字库取行）**，用 g++ 在电脑上跑，不需要硬件
   - `pc/bridge_daemon.py` 的 `SerialTransport` + `pc/_smoke_test_serial.py`（9 例）
   - Python 侧四套冒烟测试共 **47 例全通过**（`_smoke_test.py` 已扩到 10 例，含 PermissionRequest 用例）
 - **非 Bash 审批已接入**（2026-10-01）：`hook_client.py` 支持 `PermissionRequest` 事件（非 Bash 工具弹权限窗时触发），按 `decision.behavior` 输出决策（与 PreToolUse 的 `permissionDecision` 是两套格式，不能串）；配置已就绪、**待真机联调**（`.claude/settings.json` 的 9 个 hook 当前全部注释，联调时启用）。与 Clawd on Desk 并存的实测结论见 `.claude/README.md`
 - **屏幕已验证点亮**：`test-firmware/tfttest_uno` 在这块 UNO + 1.77" 屏上显示正常（用户实测）。
+- **状态动画更新**（2026-10-14）：六态采用局部几何动效，普通图标刷新区为 x=56..103、y=20..67，正文从 y=68 开始且不参与清屏；编译期检查会阻止图标区侵入标题或正文，`LOST` 动效限定在文字上方。新版本已烧录到 COM7；用户实机确认六态文字均可见，`APPROVE?` 与审批摘要单独保持 12 秒可见。长中文折行与缺字框仍待实测。
+- **审批键误触保护**（2026-10-14）：曾在无人触碰时收到 `deny`；诊断 sketch 读到空闲 D2/D3 均为 HIGH。固件已改为 LOW 连续稳定 35 ms 才接受、松开后重武装；12 秒审批卡保持测试无误拒。新去抖后的主动按键响应仍待单独确认。
 - **固件已烧录并跑起来**（2026-09-25，COM9）：设备上电/复位后会发 `{"type":"hello","fw":"uno/1.0"}`，串口 115200 收发正常、中文经探针发送不乱码。
 - **Hook 已启用并实测**（2026-09-25）：设备按批准 → 命令放行；按拒绝 → 报 `PreToolUse:Bash hook error: Denied by VibePet`、命令被拦下。按钮位置见 `.claude/README.md` 末尾的提醒。
 - **修掉一个实测中暴露的 bug**（2026-09-25）：多条审批挤在一起时「有的审批不显示」—— 审批进行中 daemon 仍会下发状态，把屏幕上的审批卡顶掉。已改为审批期间只记账不下发，回归测试是用例 14。
@@ -29,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `test-firmware/tfttest_uno/tfttest_uno.ino` —— **UNO + ST7735 的接线与库用法权威参考**（Adafruit_GFX + Adafruit_ST7735，引脚 CS=D10 / DC=D9 / RES=D8 / SCK=D13 / MOSI=D11 / 背光→3.3V）。主固件的显示部分照它写，且已实测点亮
 - `tools/cn_charset.txt` —— 字库字集清单；`tools/gen_cn_font.py` —— 字库裁剪工具
 - `README.md` —— **面向使用者**的文档（安装 / 日常使用 / 排障），受众与 CLAUDE.md 不同。改了用户可见的行为（命令行参数、状态含义、接线、安装步骤）要同步更新它
-- `.claude/settings.json` —— Claude Code Hook 配置（**9 个事件：`PreToolUse` + `PermissionRequest` 做审批、7 个状态上报**，每个都带显式 `timeout`）。**当前 9 个 hook 全部为注释状态**（2026-10-01 起，等真机联调时启用）。启用与关闭方式、Clawd on Desk 并存结论（2026-10-01 实测不冲突）见 `.claude/README.md`
+- `.claude/settings.json` —— Claude Code Hook 配置（**9 个事件：`PreToolUse` + `PermissionRequest` 做审批、7 个状态上报**，每个都带显式 `timeout`）。**当前 9 个 hook 全部为注释状态**（2026-10-01 起，等真机联调时启用）。启用与关闭方式、Clawd on Desk 并行审批的待验证事项见 `.claude/README.md`
 
 **注释密度是刻意的，不要删**：`pc/hook_client.py`、`pc/bridge_daemon.py`、`firmware/VibePet_UNO/VibePet_UNO.ino` 三个核心文件的注释是写给新手看的（每个函数前有一段大白话说明「这段在干嘛、为什么需要它」），密度高于一般工程代码。这是本项目目标读者（没写过嵌入式 / 异步程序的人）决定的 —— **不要以「注释太多/太啰嗦」为由删减**。
 
@@ -79,7 +81,7 @@ CLI="/d/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
   --upload -p COM7 firmware/VibePet_UNO
 
 # ── 验证 -D 真的生效了：看 RAM 数字 ──
-#   带 -D：Global variables ≈ 1282 字节（RX 256 + TX 64）
+#   带 -D：Global variables ≈ 1286 字节（RX 256 + TX 64，含按键滤波状态）
 #   不带：Global variables ≈ 1090 字节（RX 64）  ← 数字不对说明标志没生效
 #
 # 为什么必须显式给 --build-path：arduino-cli 会缓存核心库（HardwareSerial 等）
@@ -163,12 +165,12 @@ USB 串口 115200 8N1（设备的 D0/D1，经板载 USB 转串口芯片枚举为
 
 | 状态值 | 颜色 | 屏幕效果 |
 |---|---|---|
-| `idle` | 白 | 呼吸圆点 + "IDLE" |
-| `working` | 绿 | 旋转方块 + "WORKING" |
-| `needs_you` | 黄 | 闪烁边框 + "APPROVE?" + 命令摘要 |
-| `done` | 青 | 对勾 + "DONE" |
-| `error` | 红 | 叉号 + "ERROR" + 错误信息 |
-| `heartbeat_lost` | 橙 | "LOST" 大字 |
+| `idle` | 白 | 呼吸小宠物 + "IDLE" |
+| `working` | 绿 | 跑动光标与键盘 + "WORKING" |
+| `needs_you` | 黄 | 感叹号提示、闪烁边框 + "APPROVE?" + 命令摘要 |
+| `done` | 青 | 逐段出现的对勾与闪光 + "DONE" |
+| `error` | 红 | 叉号旁烟团轻动 + "ERROR" + 错误信息 |
+| `heartbeat_lost` | 橙 | 断线信号图标轻闪 + "LOST" 大字 |
 
 ## Hook 事件 → 状态映射
 
@@ -207,7 +209,7 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 |---|---|---|
 | 心跳间隔 | 1.0 s | daemon 主动发送（同时充当链路探针：写失败即判定掉线） |
 | 看门狗超时 | 5000 ms | 设备端 `WATCHDOG_TIMEOUT` |
-| 按钮去抖 | 200 ms | 设备端 `DEBOUNCE_MS` |
+| 按钮去抖 | LOW 稳定 35 ms，松开后重新武装 | 设备端 `BUTTON_STABLE_MS` |
 | 审批超时 | 120 s（可配置） | daemon，超时返回 `deny` |
 | 本地 Socket | `127.0.0.1:8765` | `hook_client.py` ↔ daemon |
 | 动画刷新 | ~50 ms | 设备端主循环 |

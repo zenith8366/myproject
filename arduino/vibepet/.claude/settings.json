@@ -8,7 +8,7 @@
             "shell": "bash",
             "timeout": 150,
             "statusMessage": "VibePet：等你在设备上按按钮（最长 130 秒）",
-            "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+            "command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
           }
         ]
       }
@@ -22,7 +22,7 @@
             "shell": "bash",
             "timeout": 150,
             "statusMessage": "VibePet：等你在设备上按按钮（最长 130 秒）",
-            "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+            "command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
           }
         ]
       }
@@ -34,7 +34,7 @@
             "type": "command",
             "shell": "bash",
             "timeout": 5,
-            "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+            "command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
           }
         ]
       }
@@ -46,7 +46,7 @@
             "type": "command",
             "shell": "bash",
             "timeout": 5,
-            "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+            "command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
           }
         ]
       }
@@ -58,7 +58,7 @@
             "type": "command",
             "shell": "bash",
             "timeout": 5,
-            "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+            "command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
           }
         ]
       }
@@ -70,7 +70,7 @@
             "type": "command",
             "shell": "bash",
             "timeout": 5,
-            "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+            "command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
           }
         ]
       }
@@ -82,7 +82,7 @@
             "type": "command",
             "shell": "bash",
             "timeout": 5,
-            "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+            "command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
           }
         ]
       }
@@ -94,7 +94,7 @@
             "type": "command",
             "shell": "bash",
             "timeout": 5,
-            "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+            "command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
           }
         ]
       }
@@ -106,7 +106,7 @@
             "type": "command",
             "shell": "bash",
             "timeout": 5,
-            "command": "# python \"E:/myproject/vibepet/pc/hook_client.py\""
+            "command": "# python \"${CLAUDE_PROJECT_DIR}/pc/hook_client.py\""
           }
         ]
       }

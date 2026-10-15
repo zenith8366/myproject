@@ -43,11 +43,14 @@
  *      +------------------------------------------+  ← 闪烁边框（等待审批时）
  *      |                 APPROVE?                 |  ← 标题：内置字体的两倍大
  *      |                                          |
- *      |                 (图标区域)                |  ← 呼吸圆点 / 跑动方块 / 对勾 / 叉
+ *      |                 (图标区域)                |  ← 六态轻量动画；不清正文
  *      |                                          |
  *      |          Bash: rm -rf /tmp/build         |  ← 正文：12 像素中文字库，自动折行
- *      |          最多四行，一行放不下就用 .. 收尾       |
+ *      |          短文保留图标，长文自动扩大正文区        |
  *      +------------------------------------------+
+ *
+ * 长文本改用紧凑标题栏：图标缩成标题左侧的小圆点，正文左对齐、最多五行，
+ * 每行之间留 5 像素；超出才用 .. 收尾，不把字号越缩越小。
  *
  * ━━━━━━━━━━━━━━━ 和设计文档的关系 ━━━━━━━━━━━━━━━
  *
@@ -98,9 +101,12 @@
 
 // ── 时序（毫秒）──
 #define WATCHDOG_TIMEOUT 5000   // 超过这么久没收到任何消息 → 显示「失联」
-#define DEBOUNCE_MS       200   // 按钮去抖窗口
+#define BUTTON_STABLE_MS   35   // 按下电平连续稳定这么久才算一次有效按键
 #define ANIM_FRAME_MS      90   // 动画换帧间隔
 #define BLINK_MS          500   // 等待审批时边框闪烁的间隔
+#define DONE_FRAME_MS      85   // 对勾逐段出现的间隔
+#define ERROR_FRAME_MS   260   // 错误烟雾上升一帧的间隔
+#define LOST_FRAME_MS    500   // 失联信号闪烁间隔
 
 // ── 屏幕布局（横屏画布 160 宽 × 128 高）──
 #define SCREEN_W   160
@@ -110,9 +116,39 @@
 #define ICON_CX    80    // 图标区中心
 #define ICON_CY    40
 #define ICON_HALF  24    // 图标区半边长（清理时按这个范围擦）
-#define BODY_TOP   68    // 正文第一行的顶边
-#define BODY_LINE_H 15   // 正文行高（字高 13 + 2 行距）
-#define BODY_LINES   4   // 正文最多几行
+#define BODY_TOP   70    // 短正文区域的顶边，与图标留出间隔
+#define TITLE_H    16    // 内置 5×7 字体放大两倍后的高度
+#define ICON_AREA_LEFT   (ICON_CX - ICON_HALF)
+#define ICON_AREA_RIGHT  (ICON_CX + ICON_HALF)  // 右边界不包含
+#define ICON_AREA_TOP    20
+#define ICON_AREA_BOTTOM 68                    // 下边界不包含
+#define LOST_SIGNAL_TOP  (ICON_CY - 25)
+#define LOST_SIGNAL_H    20
+#define LOST_TEXT_TOP    44
+#define BODY_MARGIN  8   // 左右与底边留白，正文不会贴着审批边框
+#define BODY_WIDTH (SCREEN_W - 2 * BODY_MARGIN)
+#define BODY_LINE_H 18   // 正文行高（字高 13 + 5 行距）
+#define BODY_LINES   5   // 长正文最多五行
+#define LONG_BODY_TOP 34 // 长正文让出标题栏后直接开始
+#define HEADER_DOT_X 14
+#define HEADER_DOT_Y 12
+
+// 布局保护：标题和正文是硬边界，图标动画不得侵入。
+#if ICON_AREA_TOP < (TITLE_Y + TITLE_H)
+  #error "Icon animation area overlaps the title"
+#endif
+#if ICON_AREA_BOTTOM > BODY_TOP
+  #error "Icon animation area overlaps body text"
+#endif
+#if (LOST_SIGNAL_TOP + LOST_SIGNAL_H) > LOST_TEXT_TOP
+  #error "LOST signal animation overlaps LOST text"
+#endif
+#if LONG_BODY_TOP < (TITLE_Y + TITLE_H + 8)
+  #error "Long body text overlaps the title"
+#endif
+#if (LONG_BODY_TOP + (BODY_LINES - 1) * BODY_LINE_H + CN_FONT_H) > (SCREEN_H - BODY_MARGIN)
+  #error "Body text exceeds the bottom margin"
+#endif
 
 // ── 颜色（RGB565）──
 // 背景纯黑是为了省电和对比度；六种状态各有自己的颜色（设计文档 3.3 的表）。
@@ -144,12 +180,15 @@ static PetState currentState = ST_IDLE;
 static PetState lastValidState = ST_IDLE;  // 失联恢复时要回到的那个状态
 
 static unsigned long lastHeartbeat = 0;    // 上次收到**任何**合法消息的时刻
-static unsigned long lastApproveMs = 0;
-static unsigned long lastDenyMs = 0;
+static unsigned long approveLowSince = 0;
+static unsigned long denyLowSince = 0;
 static unsigned long lastAnimMs = 0;
 static unsigned long lastBlinkMs = 0;
 static uint8_t animPhase = 0;
 static bool borderOn = false;               // 等待审批时边框的亮灭
+static bool compactBody = false;             // 长正文使用紧凑标题栏，让出大图标位置
+static bool approveTimingLow = false, denyTimingLow = false;
+static bool approveLatched = false, denyLatched = false;
 
 // 放在存储（Flash）里的中文常量。用 strcpy_P 取出来才能用 —— 直接写 "已批准"
 // 会把它塞进内存，而内存只有 2KB。
@@ -300,58 +339,99 @@ static void drawTextCentered(int16_t top, const char *text, uint16_t fg, uint16_
   drawText((SCREEN_W - width) / 2, top, text, fg, bg);
 }
 
-// 按屏宽折行，最多 BODY_LINES 行，每行水平居中；放不下时最后一行用 ".." 收尾。
-//
-// 折行必须**按字**而不是按字节：一个汉字 3 字节，从中间切开就会出乱码。
-// 所以这里先扫一遍算出每一行从哪个字节开始，再逐行画。
-static void drawBodyText(const char *text) {
-  const char *lineStart[BODY_LINES];
-  uint16_t lineWidth[BODY_LINES];
-  uint8_t lineCount = 0;
-
-  const char *cursor = text;
-  const char *lineBegin = text;
-  uint16_t width = 0;
-
-  while (*cursor != '\0' && lineCount < BODY_LINES) {
+// 从一行里取出能放下的完整字符，优先在空格、路径分隔符处换行。
+// 超长文件名仍允许按字拆开；不能因为路径开头的 "E:/" 就浪费一整行。
+// end 是本行的末尾，返回值是下一行的起点，两者可能隔着被略过的空格。
+static const char *bodyLine(const char *start, const char **end, uint16_t *lineWidth) {
+  const char *cursor = start;
+  const char *breakEnd = NULL;
+  const char *breakNext = NULL;
+  uint16_t width = 0, breakWidth = 0;
+  while (*cursor != '\0') {
     const char *before = cursor;
     uint16_t code = utf8Next(&cursor);
     if (code == 0) break;
+    if (code == '\n') {
+      *end = before;
+      *lineWidth = width;
+      return cursor;
+    }
     uint8_t advance = glyphAdvance(code);
-    if (width + advance > SCREEN_W) {
-      // 这一行放不下了：记录下来，另起一行
-      lineStart[lineCount] = lineBegin;
-      lineWidth[lineCount] = width;
-      lineCount++;
-      lineBegin = before;
-      width = advance;
-    } else {
-      width += advance;
+    if (width + advance > BODY_WIDTH) {
+      if (breakEnd != NULL && breakWidth >= BODY_WIDTH / 2) {
+        *end = breakEnd;
+        *lineWidth = breakWidth;
+        return breakNext;
+      }
+      *end = before;
+      *lineWidth = width;
+      return before;
+    }
+    if (code == ' ') {
+      breakEnd = before;
+      breakNext = cursor;
+      breakWidth = width;
+    }
+    width += advance;
+    if (code == '/' || code == '\\' || code == '-' || code == '_') {
+      breakEnd = cursor;
+      breakNext = cursor;
+      breakWidth = width;
     }
   }
-  if (lineCount < BODY_LINES && lineBegin < cursor) {
-    lineStart[lineCount] = lineBegin;
-    lineWidth[lineCount] = width;
+  *end = cursor;
+  *lineWidth = width;
+  return cursor;
+}
+
+// 多于两行时缩小图标占位。先量文字再决定布局，字号始终保持清晰的 12px。
+static bool needsCompactBody(const char *text) {
+  for (uint8_t i = 0; i < 2 && *text != '\0'; i++) {
+    const char *end;
+    uint16_t width;
+    text = bodyLine(text, &end, &width);
+    while (*text == ' ') text++;
+  }
+  return *text != '\0';
+}
+
+// 按正文可用宽度折行；单行居中，多行左对齐，长文最多 BODY_LINES 行。
+//
+// 折行必须**按字**而不是按字节：一个汉字 3 字节，从中间切开就会出乱码。
+// 行距与边距固定，最后一行先给省略号留位置，保证不会碰到屏幕右边缘。
+static void drawBodyText(const char *text) {
+  const char *lineStart[BODY_LINES];
+  const char *lineEnd[BODY_LINES];
+  uint16_t lineWidth[BODY_LINES];
+  uint8_t lineCount = 0;
+  uint8_t maxLines = compactBody ? BODY_LINES : 2;
+  const char *cursor = text;
+  while (*cursor != '\0' && lineCount < maxLines) {
+    lineStart[lineCount] = cursor;
+    cursor = bodyLine(cursor, &lineEnd[lineCount], &lineWidth[lineCount]);
+    while (*cursor == ' ') cursor++;
     lineCount++;
   }
-
+  int16_t firstTop = LONG_BODY_TOP;
+  if (!compactBody) {
+    int16_t height = (lineCount - 1) * BODY_LINE_H + CN_FONT_H;
+    firstTop = BODY_TOP + (SCREEN_H - BODY_MARGIN - BODY_TOP - height) / 2;
+  }
+  uint8_t dotsWidth = glyphAdvance('.') * 2;
   for (uint8_t i = 0; i < lineCount; i++) {
-    int16_t x = (int16_t)((SCREEN_W - lineWidth[i]) / 2);
-    int16_t top = BODY_TOP + i * BODY_LINE_H;
-    // 最后一行如果还有剩，末尾补 ".." 表示被截断了
-    const char *end = (i + 1 < lineCount) ? lineStart[i + 1] : cursor;
+    int16_t x = lineCount == 1 ? (SCREEN_W - lineWidth[i]) / 2 : BODY_MARGIN;
+    int16_t top = firstTop + i * BODY_LINE_H;
     const char *p = lineStart[i];
     bool truncated = (i + 1 == lineCount) && (*cursor != '\0');
-    while (p < end) {
+    int16_t right = SCREEN_W - BODY_MARGIN - (truncated ? dotsWidth : 0);
+    while (p < lineEnd[i]) {
       uint16_t code = utf8Next(&p);
       if (code == 0) break;
-      if (truncated && x + glyphAdvance(code) + 18 > SCREEN_W) break;
+      if (x + glyphAdvance(code) > right) break;
       drawGlyph(x, top, code, C_BODY, C_BG);
       x += glyphAdvance(code);
     }
-    if (truncated && x + 12 <= SCREEN_W) {
-      x = drawText(x, top, "..", C_BODY, C_BG);
-    }
+    if (truncated) drawText(x, top, "..", C_BODY, C_BG);
     pumpSerial();
   }
 }
@@ -371,10 +451,10 @@ static void fillScreenSliced(uint16_t color) {
   }
 }
 
-// 清空图标区（也切片，虽然 48×48 只有 4 毫秒出头，但没必要冒险）
+// 清空图标区（避开标题底边和正文首行；每 8 行收一次串口）
 static void clearIconArea() {
-  for (int8_t y = -ICON_HALF; y < ICON_HALF; y += 8) {
-    tft.fillRect(ICON_CX - ICON_HALF, ICON_CY + y, ICON_HALF * 2, 8, C_BG);
+  for (int16_t y = ICON_AREA_TOP; y < ICON_AREA_BOTTOM; y += 8) {
+    tft.fillRect(ICON_AREA_LEFT, y, ICON_AREA_RIGHT - ICON_AREA_LEFT, 8, C_BG);
     pumpSerial();
   }
 }
@@ -395,14 +475,27 @@ static void drawIdleIcon() {
   static uint8_t lastRadius = 0;
   uint8_t phase = animPhase & 0x0F;
   uint8_t step = (phase < 8) ? phase : (uint8_t)(15 - phase);
-  uint8_t radius = (uint8_t)(6 + step);
+  // 直径 22–28 px：让空闲态的主体分量与其他状态图标接近。
+  uint8_t radius = (uint8_t)(11 + step / 2);
 
   if (lastRadius > 0) tft.fillCircle(ICON_CX, ICON_CY, lastRadius, C_BG);
   tft.fillCircle(ICON_CX, ICON_CY, radius, C_IDLE);
+  // SVG 参考动作：呼吸时偶尔眨眼。用小像素五官让圆点更像一只桌面小宠物。
+  tft.fillRect(ICON_CX - 4, ICON_CY - 2, 2, 3, C_BG);
+  tft.fillRect(ICON_CX + 3, ICON_CY - 2, 2, 3, C_BG);
+  tft.drawPixel(ICON_CX - 2, ICON_CY + 4, C_BG);
+  tft.drawFastHLine(ICON_CX - 1, ICON_CY + 5, 3, C_BG);
+  tft.drawPixel(ICON_CX + 2, ICON_CY + 4, C_BG);
+  if (phase == 7 || phase == 8) {
+    // 闭眼一帧：覆盖两只方眼，形成轻眨眼，不重画整张脸。
+    tft.drawFastHLine(ICON_CX - 5, ICON_CY - 1, 4, C_BG);
+    tft.drawFastHLine(ICON_CX + 2, ICON_CY - 1, 4, C_BG);
+  }
+  pumpSerial();
   lastRadius = radius;
 }
 
-// 工作中：五个方块像跑马灯一样依次点亮
+// 工作中：上排光标像在思考，下排小键盘呼应 SVG 的打字动作
 #define WORK_DOTS 5
 static void drawWorkingIcon() {
   int16_t x0 = ICON_CX - (WORK_DOTS * 10 - 2) / 2;
@@ -411,25 +504,69 @@ static void drawWorkingIcon() {
     tft.fillRect(x0 + i * 10, ICON_CY - 4, 8, 8,
                  (i == lit) ? C_WORKING : DIM(C_WORKING));
   }
+  tft.drawRoundRect(ICON_CX - 22, ICON_CY + 9, 44, 12, 3, DIM(C_WORKING));
+  for (uint8_t i = 0; i < WORK_DOTS; i++) {
+    uint16_t keyColor = (i == (lit / 2)) ? C_WORKING : DIM(C_WORKING);
+    tft.fillRect(ICON_CX - 18 + i * 7, ICON_CY + 12, 4, 3, keyColor);
+  }
+  tft.fillRect(ICON_CX - 5, ICON_CY + 17, 10, 1, DIM(C_WORKING));
   pumpSerial();
 }
 
-// 完成：一个对勾
-static void drawDoneIcon() {
+// 完成：参考 SVG 的开心/闪光动作，让对勾用四帧「画出来」后停在最终姿势
+static void drawDoneIcon(uint8_t frame) {
+  if (frame == 0) {
+    tft.fillCircle(ICON_CX - 12, ICON_CY, 2, C_DONE);
+    return;
+  }
+
+  if (frame == 1) {
+    thickLine(ICON_CX - 12, ICON_CY, ICON_CX - 7, ICON_CY + 5, 3, C_DONE);
+    pumpSerial();
+    return;
+  }
   thickLine(ICON_CX - 12, ICON_CY, ICON_CX - 3, ICON_CY + 9, 3, C_DONE);
+  pumpSerial();
+
+  if (frame == 2) {
+    thickLine(ICON_CX - 4, ICON_CY + 8, ICON_CX + 3, ICON_CY + 1, 3, C_DONE);
+    pumpSerial();
+    return;
+  }
   thickLine(ICON_CX - 4, ICON_CY + 9, ICON_CX + 12, ICON_CY - 9, 3, C_DONE);
+
+  if (frame >= 4) {
+    tft.drawFastVLine(ICON_CX + 16, ICON_CY - 13, 5, C_DONE);
+    tft.drawFastHLine(ICON_CX + 14, ICON_CY - 11, 5, C_DONE);
+    tft.drawFastVLine(ICON_CX - 17, ICON_CY + 8, 4, DIM(C_DONE));
+    tft.drawFastHLine(ICON_CX - 19, ICON_CY + 10, 5, DIM(C_DONE));
+  }
+  pumpSerial();
 }
 
-// 出错：一个叉
-static void drawErrorIcon() {
+// 出错：红叉旁冒出小烟团，取 SVG error 的「扇风/冒烟」动作做成轻量几何帧
+static void drawErrorIcon(uint8_t frame) {
   thickLine(ICON_CX - 10, ICON_CY - 10, ICON_CX + 10, ICON_CY + 10, 3, C_ERROR);
   thickLine(ICON_CX + 10, ICON_CY - 10, ICON_CX - 10, ICON_CY + 10, 3, C_ERROR);
+  pumpSerial();
+
+  if (frame == 0) return;
+  // 烟团只在图标区内轻轻上浮；最上缘不越过 y=20 的标题保护线。
+  int8_t lift = (int8_t)((frame & 1) ? 0 : 1);
+  tft.fillCircle(ICON_CX + 15, ICON_CY - 12 - lift, 2, DIM(C_ERROR));
+  tft.fillCircle(ICON_CX + 21, ICON_CY - 16 - lift, 1, C_ERROR);
+  tft.fillCircle(ICON_CX + 13, ICON_CY - 18 - lift, 1, C_ERROR);
+  pumpSerial();
 }
 
-// 等待审批：一个感叹号，外加屏幕四周的闪烁边框
-static void drawNeedsIcon() {
+// 等待审批：感叹号加两条提示光芒，配合外框闪烁；参考 mini-alert 的警示动作
+static void drawNeedsIcon(bool raysOn) {
   tft.fillRect(ICON_CX - 3, ICON_CY - 14, 6, 20, C_NEEDS);
   tft.fillCircle(ICON_CX, ICON_CY + 13, 3, C_NEEDS);
+  uint16_t rayColor = raysOn ? C_NEEDS : C_BG;
+  tft.drawLine(ICON_CX - 10, ICON_CY - 9, ICON_CX - 14, ICON_CY - 13, rayColor);
+  tft.drawLine(ICON_CX + 10, ICON_CY - 9, ICON_CX + 14, ICON_CY - 13, rayColor);
+  pumpSerial();
 }
 
 static void drawNeedsBorder(bool on) {
@@ -441,13 +578,34 @@ static void drawNeedsBorder(bool on) {
   pumpSerial();
 }
 
-// 失联：整屏变橙，中间一个大大的 LOST
+// 失联：橙色 LOST 上方显示「信号断开」图标；没有直接对应的 SVG，就用两段无线波纹和斜杠。
+static void drawLostSignal(bool wavesOn) {
+  const int16_t x = ICON_CX - 18;
+  const int16_t y = LOST_SIGNAL_TOP;
+  // 小块也分片清，避免一次 SPI 写入长时间占住主循环。
+  tft.fillRect(x, y, 36, 8, C_LOST); pumpSerial();
+  tft.fillRect(x, y + 8, 36, 8, C_LOST); pumpSerial();
+  tft.fillRect(x, y + 16, 36, LOST_SIGNAL_H - 16, C_LOST); pumpSerial();
+
+  if (wavesOn) {
+    tft.drawLine(ICON_CX - 12, y + 11, ICON_CX, y + 2, C_BG);
+    tft.drawLine(ICON_CX, y + 2, ICON_CX + 12, y + 11, C_BG);
+    tft.drawLine(ICON_CX - 7, y + 12, ICON_CX, y + 7, C_BG);
+    tft.drawLine(ICON_CX, y + 7, ICON_CX + 7, y + 12, C_BG);
+    tft.fillCircle(ICON_CX, y + 16, 2, C_BG);
+  }
+  tft.drawLine(ICON_CX - 8, y + 17, ICON_CX + 8, y + 1, C_BG);
+  pumpSerial();
+}
+
+// 失联：整屏变橙，上方信号断开图标，下方大大的 LOST
 static void drawLostScreen() {
   fillScreenSliced(C_LOST);
+  drawLostSignal(true);
   tft.setTextSize(4);                     // 放大四倍 = 每字 24×28 像素
   tft.setTextColor(ST77XX_BLACK);
   int16_t width = (int16_t)(4 * 6 * 4);
-  tft.setCursor((SCREEN_W - width) / 2, 44);
+  tft.setCursor((SCREEN_W - width) / 2, LOST_TEXT_TOP);
   // 分两次打印：四个大字一次画完要 5 毫秒出头，超过「连续阻塞不超过 3 毫秒」
   // 的纪律。拆成两个字母一组，中间收一次串口，最坏就只有 2.5 毫秒。
   tft.print(F("LO"));
@@ -491,6 +649,7 @@ static void renderState() {
     return;
   }
 
+  compactBody = needsCompactBody(msgBuf);
   fillScreenSliced(C_BG);
 
   // 标题
@@ -504,13 +663,19 @@ static void renderState() {
     default:           printTitle(F("IDLE"), 4, color); break;
   }
 
-  // 图标
-  switch (currentState) {
+  // 长文把大图标换成标题旁的小圆点，让正文独占下方区域。
+  // 动画也走同一分支，否则旧的图标清屏会擦掉上移后的文字。
+  if (compactBody) {
+    borderOn = true;
+    tft.fillCircle(HEADER_DOT_X, HEADER_DOT_Y, 3, color);
+    tft.drawFastHLine(BODY_MARGIN, 26, BODY_WIDTH, DIM(color));
+    if (currentState == ST_NEEDS_YOU) drawNeedsBorder(true);
+  } else switch (currentState) {
     case ST_IDLE:      drawIdleIcon(); break;
     case ST_WORKING:   drawWorkingIcon(); break;
-    case ST_NEEDS_YOU: drawNeedsIcon(); drawNeedsBorder(true); borderOn = true; break;
-    case ST_DONE:      drawDoneIcon(); break;
-    case ST_ERROR:     drawErrorIcon(); break;
+    case ST_NEEDS_YOU: borderOn = true; drawNeedsIcon(borderOn); drawNeedsBorder(true); break;
+    case ST_DONE:      drawDoneIcon(animPhase); break;
+    case ST_ERROR:     drawErrorIcon(animPhase); break;
     default: break;
   }
 
@@ -523,6 +688,9 @@ static void setState(PetState state) {
   if (state != ST_LOST) lastValidState = state;
   currentState = state;
   animPhase = 0;
+  lastAnimMs = millis();
+  lastBlinkMs = lastAnimMs;
+  borderOn = false;
   renderState();
 }
 
@@ -535,11 +703,24 @@ static void setStateFlash(PetState state, const char *flashText) {
 // 动画：只重画动的那一小块，不整屏刷新（整屏太慢，会丢串口数据）
 static void updateAnimation() {
   unsigned long now = millis();
+  if (compactBody && currentState != ST_LOST) {
+    if ((currentState == ST_WORKING || currentState == ST_NEEDS_YOU) &&
+        now - lastBlinkMs >= BLINK_MS) {
+      lastBlinkMs = now;
+      borderOn = !borderOn;
+      uint16_t color = stateColor(currentState);
+      tft.fillCircle(HEADER_DOT_X, HEADER_DOT_Y, 3, borderOn ? color : DIM(color));
+      if (currentState == ST_NEEDS_YOU) drawNeedsBorder(borderOn);
+      pumpSerial();
+    }
+    return;
+  }
   switch (currentState) {
     case ST_IDLE:
       if (now - lastAnimMs >= ANIM_FRAME_MS) {
         lastAnimMs = now;
         animPhase = (uint8_t)((animPhase + 1) & 0x0F);
+        clearIconArea();
         drawIdleIcon();
       }
       break;
@@ -547,6 +728,7 @@ static void updateAnimation() {
       if (now - lastAnimMs >= ANIM_FRAME_MS) {
         lastAnimMs = now;
         animPhase++;
+        clearIconArea();
         drawWorkingIcon();
       }
       break;
@@ -554,7 +736,32 @@ static void updateAnimation() {
       if (now - lastBlinkMs >= BLINK_MS) {
         lastBlinkMs = now;
         borderOn = !borderOn;
+        clearIconArea();
+        drawNeedsIcon(borderOn);
         drawNeedsBorder(borderOn);
+      }
+      break;
+    case ST_DONE:
+      if (animPhase < 4 && now - lastAnimMs >= DONE_FRAME_MS) {
+        lastAnimMs = now;
+        animPhase++;
+        clearIconArea();
+        drawDoneIcon(animPhase);
+      }
+      break;
+    case ST_ERROR:
+      if (now - lastAnimMs >= ERROR_FRAME_MS) {
+        lastAnimMs = now;
+        animPhase = (uint8_t)((animPhase + 1) & 0x03);
+        clearIconArea();
+        drawErrorIcon(animPhase);
+      }
+      break;
+    case ST_LOST:
+      if (now - lastAnimMs >= LOST_FRAME_MS) {
+        lastAnimMs = now;
+        animPhase++;
+        drawLostSignal((animPhase & 1) == 0);
       }
       break;
     default:
@@ -682,30 +889,52 @@ static void dispatchLine() {
 // 按钮接法：一端接引脚、一端接 GND，引脚启用内部上拉。所以
 // **不按 = 高电平，按下 = 低电平**。
 //
-// 去抖：机械按钮在按下的瞬间会「抖」出好几个通断，所以按下后 200 毫秒内的
-// 重复信号统统不算。
+// 去抖：LOW 必须连续稳定 35 ms 才算按下；松开后才重新允许下一次决策。
+// 这样短暂的电气毛刺不会误拒审批，长按也不会把后续审批一起点掉。
+
+static bool buttonPressedStable(uint8_t pin, unsigned long now,
+                                unsigned long &lowSince, bool &timingLow,
+                                bool &latched) {
+  if (digitalRead(pin) == HIGH) {
+    lowSince = 0;
+    timingLow = false;
+    latched = false;  // 松开后才允许下一次决策
+    return false;
+  }
+
+  if (latched) return false;
+  if (!timingLow) {
+    lowSince = now;
+    timingLow = true;
+    return false;
+  }
+  if (now - lowSince < BUTTON_STABLE_MS) return false;
+
+  timingLow = false;
+  latched = true;
+  return true;
+}
 
 static void scanButtons() {
   unsigned long now = millis();
-
-  if (digitalRead(PIN_BTN_APPROVE) == LOW && (now - lastApproveMs) > DEBOUNCE_MS) {
-    lastApproveMs = now;
-    if (ridBuf[0] != '\0') {
-      sendButton("approve");
-      ridBuf[0] = '\0';                       // 作废：一次审批只认一次按键
-      setStateFlash(ST_WORKING, STR_APPROVED);  // 本地立刻切画面，不等电脑回话
-      beepStart(2, 35, 30);
-    }
+  bool approvePressed = buttonPressedStable(PIN_BTN_APPROVE, now,
+                                            approveLowSince, approveTimingLow,
+                                            approveLatched);
+  if (approvePressed && ridBuf[0] != '\0') {
+    sendButton("approve");
+    ridBuf[0] = '\0';                       // 作废：一次审批只认一次按键
+    setStateFlash(ST_WORKING, STR_APPROVED);  // 本地立刻切画面，不等电脑回话
+    beepStart(2, 35, 30);
   }
 
-  if (digitalRead(PIN_BTN_DENY) == LOW && (now - lastDenyMs) > DEBOUNCE_MS) {
-    lastDenyMs = now;
-    if (ridBuf[0] != '\0') {
-      sendButton("deny");
-      ridBuf[0] = '\0';
-      setStateFlash(ST_IDLE, STR_DENIED);
-      beepStart(1, 120, 0);
-    }
+  bool denyPressed = buttonPressedStable(PIN_BTN_DENY, now,
+                                         denyLowSince, denyTimingLow,
+                                         denyLatched);
+  if (denyPressed && ridBuf[0] != '\0') {
+    sendButton("deny");
+    ridBuf[0] = '\0';
+    setStateFlash(ST_IDLE, STR_DENIED);
+    beepStart(1, 120, 0);
   }
 }
 
@@ -786,6 +1015,8 @@ static void checkWatchdog() {
     // lastValidState / msgBuf，等链路恢复了再拿回来用。
     ridBuf[0] = '\0';       // 审批请求作废：这期间按按钮也送不出去
     currentState = ST_LOST;
+    animPhase = 0;
+    lastAnimMs = millis();
     renderState();
   } else if (!isLost && currentState == ST_LOST) {
     // 恢复。回到失联前的状态；但如果那是一条审批卡，就退回空闲 ——

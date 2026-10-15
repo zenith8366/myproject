@@ -1,0 +1,66 @@
+{
+  "description": "VibePet Codex status and physical approval hooks.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/\"pc\"/\"codex_hook.py\").is_file()),None); print(\"{}\") if r is None else (sys.path.insert(0,str(r/\"pc\")),runpy.run_path(str(r/\"pc\"/\"codex_hook.py\"),run_name=\"__main__\"))'",
+            "commandWindows": "python -c \"import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/'pc'/'codex_hook.py').is_file()),None); print('{}') if r is None else (sys.path.insert(0,str(r/'pc')),runpy.run_path(str(r/'pc'/'codex_hook.py'),run_name='__main__'))\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/\"pc\"/\"codex_hook.py\").is_file()),None); print(\"{}\") if r is None else (sys.path.insert(0,str(r/\"pc\")),runpy.run_path(str(r/\"pc\"/\"codex_hook.py\"),run_name=\"__main__\"))'",
+            "commandWindows": "python -c \"import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/'pc'/'codex_hook.py').is_file()),None); print('{}') if r is None else (sys.path.insert(0,str(r/'pc')),runpy.run_path(str(r/'pc'/'codex_hook.py'),run_name='__main__'))\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/\"pc\"/\"codex_hook.py\").is_file()),None); print(\"{}\") if r is None else (sys.path.insert(0,str(r/\"pc\")),runpy.run_path(str(r/\"pc\"/\"codex_hook.py\"),run_name=\"__main__\"))'",
+            "commandWindows": "python -c \"import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/'pc'/'codex_hook.py').is_file()),None); print('{}') if r is None else (sys.path.insert(0,str(r/'pc')),runpy.run_path(str(r/'pc'/'codex_hook.py'),run_name='__main__'))\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/\"pc\"/\"codex_hook.py\").is_file()),None); print(\"{}\") if r is None else (sys.path.insert(0,str(r/\"pc\")),runpy.run_path(str(r/\"pc\"/\"codex_hook.py\"),run_name=\"__main__\"))'",
+            "commandWindows": "python -c \"import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/'pc'/'codex_hook.py').is_file()),None); print('{}') if r is None else (sys.path.insert(0,str(r/'pc')),runpy.run_path(str(r/'pc'/'codex_hook.py'),run_name='__main__'))\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/\"pc\"/\"codex_hook.py\").is_file()),None); print(\"{}\") if r is None else (sys.path.insert(0,str(r/\"pc\")),runpy.run_path(str(r/\"pc\"/\"codex_hook.py\"),run_name=\"__main__\"))'",
+            "commandWindows": "python -c \"import runpy,sys; from pathlib import Path; p=Path.cwd(); r=next((d for d in [p,*p.parents] if (d/'pc'/'codex_hook.py').is_file()),None); print('{}') if r is None else (sys.path.insert(0,str(r/'pc')),runpy.run_path(str(r/'pc'/'codex_hook.py'),run_name='__main__'))\"",
+            "timeout": 150,
+            "statusMessage": "VibePet: waiting for physical approval"
+          }
+        ]
+      }
+    ]
+  }
+}

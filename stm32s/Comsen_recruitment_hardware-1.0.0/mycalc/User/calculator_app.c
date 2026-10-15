@@ -630,6 +630,13 @@ static const char *const s_fun_hints[] =
   "Hello, world! :)",
   "Let's do math! >",
   "Go Go Go! >_<",
+  "Brewing :3",
+  "Peliccan town!",
+  "Teyvat waits!",
+  "Euler is here",
+  "Sanity dropping",
+  "Blood moon!",
+  "Hi,husters!",
 };
 #define APP_FUN_HINT_COUNT (sizeof(s_fun_hints) / sizeof(s_fun_hints[0]))
 

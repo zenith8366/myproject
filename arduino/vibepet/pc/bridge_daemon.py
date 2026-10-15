@@ -758,7 +758,9 @@ class Bridge:
                 log(f"审批请求发送失败，降级为 deny: {exc}")
                 return {"action": "deny"}
 
-            log(f"等待按钮: tool={tool_name} request_id={request_id} summary={summary!r}")
+            hook_event = str(hook_input.get("hook_event_name") or "unknown")
+            # 默认日志只记事件、工具与请求编号，不把可能含敏感内容的命令/文件摘要写入终端。
+            log(f"等待按钮: event={hook_event} tool={tool_name} request_id={request_id}")
             # ↓ 就是这一行，整个进程会停在这儿等你按按钮（或等超时）。
             try:
                 action = await self.wait_for_button(request_id, self.approval_timeout)
@@ -870,11 +872,41 @@ def clamp_bytes(text, max_bytes):
 
 # 把换行、制表符、连续空格统统压成单个空格。
 #
-# 为什么需要它？屏幕上的摘要只占一行。命令里要是带了换行（比如多行的
-# shell 脚本），原样发过去会让后面的内容跑到屏幕外面。
+# 为什么需要它？固件会按像素宽度折行，摘要不用保留 shell 脚本里的原始缩进。
+# 压掉这些空白，有限的正文行数才能留给真正的操作内容。
 def collapse(text):
-    """折掉换行与连续空白 —— 屏幕上只有一行位置，多行摘要会溢出。"""
+    """折掉换行与连续空白，交给固件按屏宽重新排版。"""
     return " ".join(str(text).split())
+
+
+# apply_patch 的原始参数是一整段补丁，开头的 Begin Patch / Add File 等标记
+# 会挤掉真正要看的文件名。只提取操作与路径，多文件明确标出数量；完整补丁
+# 仍由编程助手的权限界面展示，设备负责让人一眼认出当前是哪次文件操作。
+def summarize_patch(patch):
+    """识别原始补丁，返回紧凑文件摘要；不是补丁时交回通用摘要逻辑。"""
+    if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch\n"):
+        return None
+    changes = []
+    for line in patch.splitlines():
+        for marker, action in (("*** Add File: ", "Add"),
+                               ("*** Update File: ", "Edit"),
+                               ("*** Delete File: ", "Delete")):
+            if line.startswith(marker):
+                path = line[len(marker):].strip()
+                if path:
+                    changes.append((action, path))
+                break
+    if not changes:
+        return None
+    action, path = changes[0]
+    prefix = f"{action}: "
+    suffix = f" (+{len(changes) - 1} files)" if len(changes) > 1 else ""
+    budget = SUMMARY_MAX_LEN - len(prefix) - len(suffix)
+    if len(path) > budget:
+        # 同时保留盘符/目录开头与文件名末尾，不能只留下很长的父目录。
+        head = budget // 3
+        path = path[:head] + "..." + path[-(budget - head - 3):]
+    return clamp_bytes(prefix + path + suffix, MAX_FIELD_BYTES)
 
 
 # 从工具参数里挑出「最能让人一眼看懂」的那个字段，做成摘要。
@@ -887,6 +919,11 @@ def summarize(tool_input):
     按「人能一眼看懂」的优先级取字段：命令 > 路径 > 模式 > URL，
     都没有就退化成整个 tool_input 的字符串形式。
     """
+    patch = (tool_input.get("patch") or tool_input.get("input")) if isinstance(tool_input, dict) else tool_input
+    patch_summary = summarize_patch(patch)
+    if patch_summary is not None:
+        return patch_summary
+
     if not isinstance(tool_input, dict):
         # 少数工具的参数不是字典（可能是字符串），兜底处理。
         return clamp_bytes(collapse(tool_input)[:SUMMARY_MAX_LEN], MAX_FIELD_BYTES)
