@@ -395,10 +395,23 @@ def emit_decision(allow, reason, event="PreToolUse"):
 # 这个函数的核心是「再糟也要给个答复」：不管中途发生什么，最后都一定会调用
 # 一次 emit_decision()。因为对 Claude Code 来说，「不说话」等于放行，而我们
 # 宁可错杀不可放过 —— 所以下面每个 except 分支的结局都是 emit_decision(False)。
+# 交互类工具不占用设备审批：它们需要用户在终端里选择/确认，
+# 设备只有两个按钮，无法表达多选项。
+INTERACTIVE_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
+
+
 def handle_approval_event(event, hook_input):
     """审批路径：阻塞等按钮，并按触发事件输出决策。"""
     tool_name = hook_input.get("tool_name", "")
     debug(f"收到审批请求: event={event} tool={tool_name}")
+
+    if tool_name in INTERACTIVE_TOOLS:
+        # 先让设备亮起「请到电脑答题」提醒，再放行给终端原生交互。
+        # report_state 自带超时与静默失败，daemon 不在也不会拖住这里。
+        report_state("interactive", "请到电脑答题")
+        log(f"交互类工具 {tool_name} 交给终端原生交互，不占用设备审批")
+        emit_decision(True, "VibePet: interactive tool, handled in terminal", event)
+        return 0
 
     try:
         action = request_decision(hook_input)

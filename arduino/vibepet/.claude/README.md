@@ -104,7 +104,7 @@ HTTP hook 是否也会及时结束。因此**不能据此确认两条权限审�
 | 事件触发 | ✅ 需要权限的文件写入触发了 `PermissionRequest`，VibePet 收到并处理 |
 | 降级路径 | ✅ daemon 不在 → 数秒内出 `deny`，链路上没有分钟级等待 |
 | Clawd 并存 | ⚠️ 已验证 daemon 离线时能快速 `deny`；设备在线、两条审批链同时等待时的行为未验证 |
-| 交互类工具 | ⚠️ `AskUserQuestion` / `ExitPlanMode` 也会被接上设备卡；daemon 不在时会被 deny。hook 的 `allow` 不足以跳过它们的原生交互 —— 行为待真机联调确认，可能需要豁免 |
+| 交互类工具 | ✅ `AskUserQuestion` / `ExitPlanMode` 不占用设备审批：`hook_client` 上报 `interactive` 后直接 allow，设备显示 `CHECK PC`；daemon 离线也照样放行 |
 
 **按钮位置提醒**：实测发现，接在 **D2** 上的按钮是「批准」（屏幕显示**已批准**），
 接在 **D3** 上的是「拒绝」（屏幕显示**已拒绝**）。两个按钮哪个在左哪个在右取决于你怎么接的线 ——

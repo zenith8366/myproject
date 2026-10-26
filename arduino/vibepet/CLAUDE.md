@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `tools/gen_cn_font.py`：字库裁剪工具，`--verify` 黄金字形自检通过（`中` / `A` 逐位一致）
   - `tools/test_proto.cpp`：固件端**离线测试（55 例：协议解析 + 字库取行）**，用 g++ 在电脑上跑，不需要硬件
   - `pc/bridge_daemon.py` 的 `SerialTransport` + `pc/_smoke_test_serial.py`（9 例）
-  - Python 侧四套冒烟测试共 **47 例全通过**（`_smoke_test.py` 已扩到 10 例，含 PermissionRequest 用例）
+  - Python 侧四套冒烟测试共 **49 例全通过**（`_smoke_test.py` 已扩到 12 例，含 PermissionRequest 与交互工具豁免用例）
 - **非 Bash 审批已接入**（2026-10-01）：`hook_client.py` 支持 `PermissionRequest` 事件（非 Bash 工具弹权限窗时触发），按 `decision.behavior` 输出决策（与 PreToolUse 的 `permissionDecision` 是两套格式，不能串）；配置已就绪、**待真机联调**（`.claude/settings.json` 的 9 个 hook 当前全部注释，联调时启用）。与 Clawd on Desk 并存的实测结论见 `.claude/README.md`
 - **屏幕已验证点亮**：`test-firmware/tfttest_uno` 在这块 UNO + 1.77" 屏上显示正常（用户实测）。
 - **状态动画更新**（2026-10-14）：六态采用局部几何动效，普通图标刷新区为 x=56..103、y=20..67，正文从 y=68 开始且不参与清屏；编译期检查会阻止图标区侵入标题或正文，`LOST` 动效限定在文字上方。新版本已烧录到 COM7；用户实机确认六态文字均可见，`APPROVE?` 与审批摘要单独保持 12 秒可见。长中文折行与缺字框仍待实测。
@@ -19,6 +19,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Hook 已启用并实测**（2026-09-25）：设备按批准 → 命令放行；按拒绝 → 报 `PreToolUse:Bash hook error: Denied by VibePet`、命令被拦下。按钮位置见 `.claude/README.md` 末尾的提醒。
 - **修掉一个实测中暴露的 bug**（2026-09-25）：多条审批挤在一起时「有的审批不显示」—— 审批进行中 daemon 仍会下发状态，把屏幕上的审批卡顶掉。已改为审批期间只记账不下发，回归测试是用例 14。
 - **尚未做**：屏幕显示内容的实机观感（六态、中文折行、空心方框降级）、看门狗 LOST 与恢复；设计文档里标「待实测」的性能数字；**非 Bash 审批的真机联调**，以及交互类工具（`AskUserQuestion` / `ExitPlanMode`）在设备审批下的行为确认（hook 的 allow 不足以跳过它们的原生交互，可能需要豁免）。
+- **LED / 蜂鸣器提示逻辑**（2026-10-24）：D5 指示灯改为「失联、待审批、交互提醒时亮」，其余时间熄灭；审批到达提示音由一声 120 ms 改为三声 35 ms 短鸣（仍复用非阻塞节奏机）。已实测失联/恢复 LED、Bash 批准/拒绝与 `PermissionRequest` 批准。
+- **竖屏与科技动效**（2026-10-24）：屏幕改为 128×160 竖屏（`setRotation(0)`）；`DONE` 3 秒后自动回 `IDLE`；新增第七态 `interactive`（`CHECK PC` / 「请到电脑答题」），`AskUserQuestion` / `ExitPlanMode` 不再占用设备审批，`hook_client` 先上报 `interactive` 再直接 allow。六态动画增加渐变、光晕与高光；星点与扫描线因 Flash 超限已裁剪。编译 Flash 32098/32256（99%）、RAM 1304/2048；离线 55/55、冒烟 12/14/14/9 全过；**真机联调待做**。
+- **Clawd 静态画面**（2026-10-24，取代上一条的动画设计）：删除全部逐帧动画，改为全静态绘制；以 Claude Code 吉祥物 **Clawd**（珊瑚橙像素螃蟹：宽扁身体、水平细钳、四条细腿）为核心，米白底 + 经典橘 + 对话气泡，七态用表情与道具区分。编译 Flash **30392/32256（94%，余 1864 B）**、RAM 1293/2048；离线 55/55、冒烟 12/14/14/9 全过；**真机观感待确认**。
 - **v2.0 遗留已清理**（2026-09-25）：删掉了 `firmware/VibePet/`（901 行 ESP32 固件）、`vendor/TFT_eSPI/`（274 个文件，占仓库跟踪文件数的 94%）、`firmware/TFT_eSPI_User_Setup.h`、`test-firmware/tft_probe{,2}/`。仓库跟踪文件从 295 个降到 17 个，只剩有线版一条路线；要查旧实现请翻 git 历史。
 
 ## 仓库现状
@@ -31,7 +34,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `test-firmware/tfttest_uno/tfttest_uno.ino` —— **UNO + ST7735 的接线与库用法权威参考**（Adafruit_GFX + Adafruit_ST7735，引脚 CS=D10 / DC=D9 / RES=D8 / SCK=D13 / MOSI=D11 / 背光→3.3V）。主固件的显示部分照它写，且已实测点亮
 - `tools/cn_charset.txt` —— 字库字集清单；`tools/gen_cn_font.py` —— 字库裁剪工具
 - `README.md` —— **面向使用者**的文档（安装 / 日常使用 / 排障），受众与 CLAUDE.md 不同。改了用户可见的行为（命令行参数、状态含义、接线、安装步骤）要同步更新它
-- `.claude/settings.json` —— Claude Code Hook 配置（**9 个事件：`PreToolUse` + `PermissionRequest` 做审批、7 个状态上报**，每个都带显式 `timeout`）。**当前 9 个 hook 全部为注释状态**（2026-10-01 起，等真机联调时启用）。启用与关闭方式、Clawd on Desk 并行审批的待验证事项见 `.claude/README.md`
+- `.claude/settings.json` —— Claude Code Hook 配置（**9 个事件：`PreToolUse` + `PermissionRequest` 做审批、7 个状态上报**，每个都带显式 `timeout`）。**当前 9 个 hook 已启用**（2026-10-24 起）。启用与关闭方式、Clawd on Desk 并行审批的实测结论见 `.claude/README.md`
 
 **注释密度是刻意的，不要删**：`pc/hook_client.py`、`pc/bridge_daemon.py`、`firmware/VibePet_UNO/VibePet_UNO.ino` 三个核心文件的注释是写给新手看的（每个函数前有一段大白话说明「这段在干嘛、为什么需要它」），密度高于一般工程代码。这是本项目目标读者（没写过嵌入式 / 异步程序的人）决定的 —— **不要以「注释太多/太啰嗦」为由删减**。
 
@@ -39,7 +42,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # 冒烟测试（都不需要硬件）
-python pc/_smoke_test.py           # hook_client 审批路径：10 例（含 PermissionRequest）
+python pc/_smoke_test.py           # hook_client 审批路径：12 例（含 PermissionRequest 与交互工具豁免）
 python pc/_smoke_test_daemon.py    # bridge_daemon：14 例，含端到端联调
 python pc/_smoke_test_state.py     # 事件 → 状态映射：14 例
 python pc/_smoke_test_serial.py    # 串口传输层：9 例，注入假串口，不需要真设备
@@ -171,16 +174,17 @@ USB 串口 115200 8N1（设备的 D0/D1，经板载 USB 转串口芯片枚举为
 | `done` | 青 | 逐段出现的对勾与闪光 + "DONE" |
 | `error` | 红 | 叉号旁烟团轻动 + "ERROR" + 错误信息 |
 | `heartbeat_lost` | 橙 | 断线信号图标轻闪 + "LOST" 大字 |
+| `interactive` | 蓝紫 | 显示器动画 + "CHECK PC" + "请到电脑答题" |
 
 ## Hook 事件 → 状态映射
 
-`hook_client.py` 会被挂在多个 Hook 上，按 `hook_event_name` 分派。六种状态中
-`heartbeat_lost` 由设备端看门狗独立判断，其余五种在这里闭环：
+`hook_client.py` 会被挂在多个 Hook 上，按 `hook_event_name` 分派。七种状态中
+`heartbeat_lost` 由设备端看门狗独立判断，其余六种在这里闭环：
 
 | Hook 事件 | 状态 | 屏幕文字 |
 |---|---|---|
 | `PreToolUse` | 不发 state | 改走 `approval_request`，阻塞等按钮 |
-| `PermissionRequest` | 不发 state | 同 `PreToolUse`（非 Bash 的权限弹窗走这里） |
+| `PermissionRequest` | 不发 state | 同 `PreToolUse`（非 Bash 的权限弹窗走这里）；但 `AskUserQuestion` / `ExitPlanMode` 直接 allow，并上报 `interactive` |
 | `PostToolUse` 成功 | `working` | `<工具名> 完成` |
 | `PostToolUse` 失败 | `error` | `<工具名> 出错` |
 | `SessionStart` / `SessionEnd` | `idle` | 会话开始 / 会话结束 |
@@ -221,7 +225,8 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 
 ## 硬件接线（Arduino UNO R3）
 
-屏幕为 **1.77" ST7735S（128×160）**，`tft.setRotation(1)` 的横屏画布是 **160×128**。
+屏幕为 **1.77" ST7735S（128×160）**，`tft.setRotation(0)` 的竖屏画布是 **128×160**
+（若烧录后画面倒置，改 `setRotation(2)`）。
 
 | 外设 | 引脚 | 说明 |
 |---|---|---|
@@ -234,7 +239,7 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 | 批准按钮 | D2 | `INPUT_PULLUP`，按下为 LOW |
 | 拒绝按钮 | D3 | `INPUT_PULLUP`，按下为 LOW |
 | 蜂鸣器 | D4 | 无源，`tone()` 方波驱动（AVR 用 Timer2），**必须非阻塞** |
-| 状态 LED | D5 | 链路指示灯（心跳正常时点亮） |
+| 状态 LED | D5 | 失联 / 待审批 / 交互提醒时点亮 |
 | **USB 数据链路** | **D0/D1** | `Serial` 115200，**禁止接任何外设**；同时是烧录口 |
 
 **UNO 没有 strapping 启动脚** —— v2.0 文档里「避开 GPIO9/8、按住按钮上电会不会进下载模式」那一整段在 UNO 上**不存在**，不要照搬过来。

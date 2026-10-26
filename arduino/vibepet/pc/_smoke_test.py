@@ -194,6 +194,68 @@ check("非对象 JSON（数组）-> deny 且不崩溃", "deny", start_daemon=Fal
 check("stdin 为空 -> deny 且不崩溃", "deny", start_daemon=False,
       raw_input=b"", expect_forward=False)
 
+# —— 交互类工具：AskUserQuestion / ExitPlanMode ——
+# 设备只有两个按钮，无法表达多选项；这类工具交给终端原生交互。
+# 期望：hook_client 先上报 interactive 状态，然后直接 allow；
+#       daemon 不在时也必须 allow（否则正常选择题会被 deny 掉）。
+INTERACTIVE_INPUT = {
+    "session_id": "test-session",
+    "hook_event_name": "PermissionRequest",
+    "tool_name": "AskUserQuestion",
+    "tool_input": {"questions": [{"question": "选哪个？", "options": ["A", "B"]}]},
+}
+
+
+def check_interactive(name, daemon_online):
+    daemon = FakeDaemon({}, reply=True) if daemon_online else None
+    time.sleep(0.35)
+    try:
+        proc = run_client(hook_input=INTERACTIVE_INPUT)
+    finally:
+        if daemon:
+            daemon.close()
+        time.sleep(0.3)
+
+    out = proc.stdout.decode("utf-8")
+    problems = []
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if len(lines) != 1:
+        problems.append(f"stdout 应为 1 行，实际 {len(lines)} 行: {out!r}")
+    else:
+        try:
+            hso = json.loads(lines[0])["hookSpecificOutput"]
+            if hso.get("hookEventName") != "PermissionRequest":
+                problems.append(f"hookEventName 错误: {hso.get('hookEventName')!r}")
+            if hso["decision"]["behavior"] != "allow":
+                problems.append(
+                    f"交互工具应 allow，实际 {hso['decision']['behavior']!r}")
+        except Exception as exc:
+            problems.append(f"stdout 不是预期 Hook JSON ({exc}): {out!r}")
+
+    if daemon_online:
+        if daemon.received is None:
+            problems.append("daemon 未收到 interactive 状态")
+        else:
+            try:
+                forwarded = json.loads(daemon.received)
+                want = {"type": "state", "status": "interactive",
+                        "msg": "请到电脑答题"}
+                if forwarded != want:
+                    problems.append(f"状态上报内容错误: {forwarded!r}")
+            except Exception as exc:
+                problems.append(
+                    f"状态上报不是合法 JSON ({exc}): {daemon.received!r}")
+
+    if proc.returncode != 0:
+        problems.append(f"退出码应为 0，实际 {proc.returncode}")
+
+    stderr_text = proc.stderr.decode("utf-8", errors="replace").strip()
+    results.append((name, not problems, problems, stderr_text))
+
+
+check_interactive("AskUserQuestion -> 提醒并 allow（daemon 在线）", True)
+check_interactive("AskUserQuestion daemon 未运行 -> 仍 allow", False)
+
 print("=" * 68)
 failed = 0
 for name, ok, problems, stderr_text in results:

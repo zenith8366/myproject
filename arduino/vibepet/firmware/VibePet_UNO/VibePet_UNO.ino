@@ -38,7 +38,7 @@
  *     · 蜂鸣器要**非阻塞**（老版本用 delay 等响完，在这里会直接丢消息）
  *   这两处的代码里都有注释说明。
  *
- * ━━━━━━━━━━━━━━━ 屏幕长什么样（160×128 横屏）━━━━━━━━━━━━━━━
+ * ━━━━━━━━━━━━━━━ 屏幕长什么样（128×160 竖屏）━━━━━━━━━━━━━━━
  *
  *      +------------------------------------------+  ← 闪烁边框（等待审批时）
  *      |                 APPROVE?                 |  ← 标题：内置字体的两倍大
@@ -81,7 +81,7 @@
 #define PIN_BTN_APPROVE 2   // 批准按钮：一端接此脚，另一端接 GND
 #define PIN_BTN_DENY    3   // 拒绝按钮：同上
 #define PIN_BUZZER      4   // 无源蜂鸣器：靠方波驱动，空闲保持低
-#define PIN_LED_STATUS  5   // 链路指示灯：心跳正常时点亮
+#define PIN_LED_STATUS  5   // 指示灯：失联或有待审批时点亮，其余时间熄灭
 
 // D0 / D1 是 USB 串口，**永远不要往上接外设**（接了电脑就认不到设备）。
 
@@ -102,73 +102,54 @@
 // ── 时序（毫秒）──
 #define WATCHDOG_TIMEOUT 5000   // 超过这么久没收到任何消息 → 显示「失联」
 #define BUTTON_STABLE_MS   35   // 按下电平连续稳定这么久才算一次有效按键
-#define ANIM_FRAME_MS      90   // 动画换帧间隔
-#define BLINK_MS          500   // 等待审批时边框闪烁的间隔
-#define DONE_FRAME_MS      85   // 对勾逐段出现的间隔
-#define ERROR_FRAME_MS   260   // 错误烟雾上升一帧的间隔
-#define LOST_FRAME_MS    500   // 失联信号闪烁间隔
+#define DONE_HOLD_MS     3000   // DONE 停留 3 秒后自动回 IDLE
 
-// ── 屏幕布局（横屏画布 160 宽 × 128 高）──
-#define SCREEN_W   160
-#define SCREEN_H   128
-#define TITLE_X     0
-#define TITLE_Y     4
-#define ICON_CX    80    // 图标区中心
-#define ICON_CY    40
-#define ICON_HALF  24    // 图标区半边长（清理时按这个范围擦）
-#define BODY_TOP   70    // 短正文区域的顶边，与图标留出间隔
-#define TITLE_H    16    // 内置 5×7 字体放大两倍后的高度
-#define ICON_AREA_LEFT   (ICON_CX - ICON_HALF)
-#define ICON_AREA_RIGHT  (ICON_CX + ICON_HALF)  // 右边界不包含
-#define ICON_AREA_TOP    20
-#define ICON_AREA_BOTTOM 68                    // 下边界不包含
-#define LOST_SIGNAL_TOP  (ICON_CY - 25)
-#define LOST_SIGNAL_H    20
-#define LOST_TEXT_TOP    44
-#define BODY_MARGIN  8   // 左右与底边留白，正文不会贴着审批边框
-#define BODY_WIDTH (SCREEN_W - 2 * BODY_MARGIN)
-#define BODY_LINE_H 18   // 正文行高（字高 13 + 5 行距）
-#define BODY_LINES   5   // 长正文最多五行
-#define LONG_BODY_TOP 34 // 长正文让出标题栏后直接开始
-#define HEADER_DOT_X 14
-#define HEADER_DOT_Y 12
-
-// 布局保护：标题和正文是硬边界，图标动画不得侵入。
-#if ICON_AREA_TOP < (TITLE_Y + TITLE_H)
-  #error "Icon animation area overlaps the title"
-#endif
-#if ICON_AREA_BOTTOM > BODY_TOP
-  #error "Icon animation area overlaps body text"
-#endif
-#if (LOST_SIGNAL_TOP + LOST_SIGNAL_H) > LOST_TEXT_TOP
-  #error "LOST signal animation overlaps LOST text"
-#endif
-#if LONG_BODY_TOP < (TITLE_Y + TITLE_H + 8)
-  #error "Long body text overlaps the title"
-#endif
-#if (LONG_BODY_TOP + (BODY_LINES - 1) * BODY_LINE_H + CN_FONT_H) > (SCREEN_H - BODY_MARGIN)
-  #error "Body text exceeds the bottom margin"
-#endif
+// ── 屏幕布局（竖屏 128×160，Clawd 静态画面）──
+#define SCREEN_W   128
+#define SCREEN_H   160
+#define TITLE_Y      4
+#define TITLE_H     16
+#define STATUS_LINE_Y 22
+#define BODY_X      35    // Clawd 身体
+#define BODY_Y      44
+#define BODY_W      58
+#define BODY_H      38
+#define EYE_Y       52
+#define EYE_L_X     45
+#define EYE_R_X     73
+#define EYE_SIZE     8
+#define CLAW_Y      54    // 钳子
+#define LEG_Y       82    // 腿
+#define LEG_H       12
+#define BUBBLE_X     4    // 正文气泡
+#define BUBBLE_Y    96
+#define BUBBLE_W   120
+#define BUBBLE_H    60
+#define BUBBLE_PAD   6
+#define BODY_WIDTH (BUBBLE_W - 2 * BUBBLE_PAD)   // 108
+#define BODY_LINES   4
+#define BODY_LINE_H 13
 
 // ── 颜色（RGB565）──
-// 背景纯黑是为了省电和对比度；六种状态各有自己的颜色（设计文档 3.3 的表）。
-#define C_BG      ST77XX_BLACK
-#define C_TITLE   ST77XX_WHITE
-#define C_BODY    ST77XX_WHITE
-#define C_IDLE    ST77XX_WHITE
-#define C_WORKING ST77XX_GREEN
-#define C_NEEDS   ST77XX_YELLOW
-#define C_DONE    ST77XX_CYAN
-#define C_ERROR   ST77XX_RED
-#define C_LOST    ST77XX_ORANGE
-
-// 把颜色整体调暗（每个通道右移一位）。用来画「不活跃」的元素，省得再多定义几种颜色。
-#define DIM(c) ((uint16_t)(((c) >> 1) & 0x7BEF))
+// 米白底 + Clawd 经典珊瑚橙；状态色只用于标题、状态线与道具。
+#define C_BG       0xFFBC   // #FFF5E2 米白
+#define C_INK      0x18A2   // #1A1412 深色文字/眼睛/气泡边框
+#define C_CLAWD    0xDBAA   // #D97757 Claude 经典橘
+#define C_CLAWD_DK 0xB287   // #B5523A 腿与暗部
+#define C_CARD     0xFFFF   // 气泡白底
+#define C_IDLE     0xDBAA
+#define C_WORKING  0x29EF
+#define C_NEEDS    0xF627
+#define C_DONE     0x3CF3
+#define C_ERROR    0xD9C9
+#define C_LOST     0xA558
+#define C_INTERACTIVE 0x7AF5
 
 // ═══════════════════════════ 二、全局状态 ═══════════════════════════
 
 // 六种状态（设计文档 3.3）。LOST 是设备自己判断的，其余五种来自电脑端。
-enum PetState { ST_IDLE, ST_WORKING, ST_NEEDS_YOU, ST_DONE, ST_ERROR, ST_LOST };
+enum PetState { ST_IDLE, ST_WORKING, ST_NEEDS_YOU, ST_DONE, ST_ERROR, ST_LOST,
+                ST_INTERACTIVE };
 
 static Adafruit_ST7735 tft(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
 
@@ -182,11 +163,7 @@ static PetState lastValidState = ST_IDLE;  // 失联恢复时要回到的那个�
 static unsigned long lastHeartbeat = 0;    // 上次收到**任何**合法消息的时刻
 static unsigned long approveLowSince = 0;
 static unsigned long denyLowSince = 0;
-static unsigned long lastAnimMs = 0;
-static unsigned long lastBlinkMs = 0;
-static uint8_t animPhase = 0;
-static bool borderOn = false;               // 等待审批时边框的亮灭
-static bool compactBody = false;             // 长正文使用紧凑标题栏，让出大图标位置
+static unsigned long stateSince = 0;        // 进入当前状态的时刻（DONE 回退用）
 static bool approveTimingLow = false, denyTimingLow = false;
 static bool approveLatched = false, denyLatched = false;
 
@@ -384,54 +361,40 @@ static const char *bodyLine(const char *start, const char **end, uint16_t *lineW
   return cursor;
 }
 
-// 多于两行时缩小图标占位。先量文字再决定布局，字号始终保持清晰的 12px。
-static bool needsCompactBody(const char *text) {
-  for (uint8_t i = 0; i < 2 && *text != '\0'; i++) {
-    const char *end;
-    uint16_t width;
-    text = bodyLine(text, &end, &width);
-    while (*text == ' ') text++;
-  }
-  return *text != '\0';
-}
-
-// 按正文可用宽度折行；单行居中，多行左对齐，长文最多 BODY_LINES 行。
+// 在气泡内按字折行：单行居中，多行左对齐，最多 3 行，超出用 .. 收尾。
 //
 // 折行必须**按字**而不是按字节：一个汉字 3 字节，从中间切开就会出乱码。
-// 行距与边距固定，最后一行先给省略号留位置，保证不会碰到屏幕右边缘。
 static void drawBodyText(const char *text) {
   const char *lineStart[BODY_LINES];
   const char *lineEnd[BODY_LINES];
   uint16_t lineWidth[BODY_LINES];
   uint8_t lineCount = 0;
-  uint8_t maxLines = compactBody ? BODY_LINES : 2;
   const char *cursor = text;
-  while (*cursor != '\0' && lineCount < maxLines) {
+  while (*cursor != '\0' && lineCount < BODY_LINES) {
     lineStart[lineCount] = cursor;
     cursor = bodyLine(cursor, &lineEnd[lineCount], &lineWidth[lineCount]);
     while (*cursor == ' ') cursor++;
     lineCount++;
   }
-  int16_t firstTop = LONG_BODY_TOP;
-  if (!compactBody) {
-    int16_t height = (lineCount - 1) * BODY_LINE_H + CN_FONT_H;
-    firstTop = BODY_TOP + (SCREEN_H - BODY_MARGIN - BODY_TOP - height) / 2;
-  }
+
   uint8_t dotsWidth = glyphAdvance('.') * 2;
   for (uint8_t i = 0; i < lineCount; i++) {
-    int16_t x = lineCount == 1 ? (SCREEN_W - lineWidth[i]) / 2 : BODY_MARGIN;
-    int16_t top = firstTop + i * BODY_LINE_H;
+    int16_t x = lineCount == 1
+                    ? BUBBLE_X + (BUBBLE_W - lineWidth[i]) / 2
+                    : BUBBLE_X + BUBBLE_PAD;
+    int16_t top = BUBBLE_Y + 6 + i * BODY_LINE_H;
     const char *p = lineStart[i];
     bool truncated = (i + 1 == lineCount) && (*cursor != '\0');
-    int16_t right = SCREEN_W - BODY_MARGIN - (truncated ? dotsWidth : 0);
+    int16_t right = BUBBLE_X + BUBBLE_W - BUBBLE_PAD -
+                    (truncated ? dotsWidth : 0);
     while (p < lineEnd[i]) {
       uint16_t code = utf8Next(&p);
       if (code == 0) break;
       if (x + glyphAdvance(code) > right) break;
-      drawGlyph(x, top, code, C_BODY, C_BG);
+      drawGlyph(x, top, code, C_INK, C_CARD);
       x += glyphAdvance(code);
     }
-    if (truncated) drawText(x, top, "..", C_BODY, C_BG);
+    if (truncated) drawText(x, top, "..", C_INK, C_CARD);
     pumpSerial();
   }
 }
@@ -451,14 +414,6 @@ static void fillScreenSliced(uint16_t color) {
   }
 }
 
-// 清空图标区（避开标题底边和正文首行；每 8 行收一次串口）
-static void clearIconArea() {
-  for (int16_t y = ICON_AREA_TOP; y < ICON_AREA_BOTTOM; y += 8) {
-    tft.fillRect(ICON_AREA_LEFT, y, ICON_AREA_RIGHT - ICON_AREA_LEFT, 8, C_BG);
-    pumpSerial();
-  }
-}
-
 // 画一条有粗细的线（内置库只能画 1 像素宽，这里并排画几条凑粗）
 static void thickLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
                       uint8_t weight, uint16_t color) {
@@ -468,149 +423,145 @@ static void thickLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
   }
 }
 
-// ═══════════════════════════ 六、六种状态的图标 ═══════════════════════════
+// ═══════════════════════════ 六、Clawd 静态绘制 ═══════════════════════════
+//
+// Clawd 是 Claude Code 的橙色像素螃蟹：宽扁身体、水平伸出的细钳、
+// 四条细腿。这里按官方 48×52 逻辑网格做 2× 放大，纯色平涂、无描边。
 
-// 空闲：一个会「呼吸」的圆点（半径按三角波来回变，不用 sin —— 这芯片算不动小数）
-static void drawIdleIcon() {
-  static uint8_t lastRadius = 0;
-  uint8_t phase = animPhase & 0x0F;
-  uint8_t step = (phase < 8) ? phase : (uint8_t)(15 - phase);
-  // 直径 22–28 px：让空闲态的主体分量与其他状态图标接近。
-  uint8_t radius = (uint8_t)(11 + step / 2);
-
-  if (lastRadius > 0) tft.fillCircle(ICON_CX, ICON_CY, lastRadius, C_BG);
-  tft.fillCircle(ICON_CX, ICON_CY, radius, C_IDLE);
-  // SVG 参考动作：呼吸时偶尔眨眼。用小像素五官让圆点更像一只桌面小宠物。
-  tft.fillRect(ICON_CX - 4, ICON_CY - 2, 2, 3, C_BG);
-  tft.fillRect(ICON_CX + 3, ICON_CY - 2, 2, 3, C_BG);
-  tft.drawPixel(ICON_CX - 2, ICON_CY + 4, C_BG);
-  tft.drawFastHLine(ICON_CX - 1, ICON_CY + 5, 3, C_BG);
-  tft.drawPixel(ICON_CX + 2, ICON_CY + 4, C_BG);
-  if (phase == 7 || phase == 8) {
-    // 闭眼一帧：覆盖两只方眼，形成轻眨眼，不重画整张脸。
-    tft.drawFastHLine(ICON_CX - 5, ICON_CY - 1, 4, C_BG);
-    tft.drawFastHLine(ICON_CX + 2, ICON_CY - 1, 4, C_BG);
-  }
+static void drawClawdBody() {
+  // 四条腿（先画，身体会盖住根部）
+  tft.fillRect(41, LEG_Y, 6, LEG_H, C_CLAWD_DK);
+  tft.fillRect(53, LEG_Y, 6, LEG_H, C_CLAWD_DK);
+  tft.fillRect(69, LEG_Y, 6, LEG_H, C_CLAWD_DK);
+  tft.fillRect(81, LEG_Y, 6, LEG_H, C_CLAWD_DK);
   pumpSerial();
-  lastRadius = radius;
-}
 
-// 工作中：上排光标像在思考，下排小键盘呼应 SVG 的打字动作
-#define WORK_DOTS 5
-static void drawWorkingIcon() {
-  int16_t x0 = ICON_CX - (WORK_DOTS * 10 - 2) / 2;
-  uint8_t lit = (uint8_t)(animPhase % WORK_DOTS);
-  for (uint8_t i = 0; i < WORK_DOTS; i++) {
-    tft.fillRect(x0 + i * 10, ICON_CY - 4, 8, 8,
-                 (i == lit) ? C_WORKING : DIM(C_WORKING));
-  }
-  tft.drawRoundRect(ICON_CX - 22, ICON_CY + 9, 44, 12, 3, DIM(C_WORKING));
-  for (uint8_t i = 0; i < WORK_DOTS; i++) {
-    uint16_t keyColor = (i == (lit / 2)) ? C_WORKING : DIM(C_WORKING);
-    tft.fillRect(ICON_CX - 18 + i * 7, ICON_CY + 12, 4, 3, keyColor);
-  }
-  tft.fillRect(ICON_CX - 5, ICON_CY + 17, 10, 1, DIM(C_WORKING));
+  // 左右钳子：水平细条
+  tft.fillRect(23, CLAW_Y, 12, 12, C_CLAWD);
+  tft.fillRect(93, CLAW_Y, 12, 12, C_CLAWD);
+  pumpSerial();
+
+  // 身体：宽扁圆角矩形
+  tft.fillRoundRect(BODY_X, BODY_Y, BODY_W, BODY_H, 4, C_CLAWD);
   pumpSerial();
 }
 
-// 完成：参考 SVG 的开心/闪光动作，让对勾用四帧「画出来」后停在最终姿势
-static void drawDoneIcon(uint8_t frame) {
-  if (frame == 0) {
-    tft.fillCircle(ICON_CX - 12, ICON_CY, 2, C_DONE);
-    return;
-  }
-
-  if (frame == 1) {
-    thickLine(ICON_CX - 12, ICON_CY, ICON_CX - 7, ICON_CY + 5, 3, C_DONE);
-    pumpSerial();
-    return;
-  }
-  thickLine(ICON_CX - 12, ICON_CY, ICON_CX - 3, ICON_CY + 9, 3, C_DONE);
-  pumpSerial();
-
-  if (frame == 2) {
-    thickLine(ICON_CX - 4, ICON_CY + 8, ICON_CX + 3, ICON_CY + 1, 3, C_DONE);
-    pumpSerial();
-    return;
-  }
-  thickLine(ICON_CX - 4, ICON_CY + 9, ICON_CX + 12, ICON_CY - 9, 3, C_DONE);
-
-  if (frame >= 4) {
-    tft.drawFastVLine(ICON_CX + 16, ICON_CY - 13, 5, C_DONE);
-    tft.drawFastHLine(ICON_CX + 14, ICON_CY - 11, 5, C_DONE);
-    tft.drawFastVLine(ICON_CX - 17, ICON_CY + 8, 4, DIM(C_DONE));
-    tft.drawFastHLine(ICON_CX - 19, ICON_CY + 10, 5, DIM(C_DONE));
-  }
+static void drawEyesOpen() {
+  tft.fillRect(EYE_L_X, EYE_Y, EYE_SIZE, EYE_SIZE, C_INK);
+  tft.fillRect(EYE_R_X, EYE_Y, EYE_SIZE, EYE_SIZE, C_INK);
   pumpSerial();
 }
 
-// 出错：红叉旁冒出小烟团，取 SVG error 的「扇风/冒烟」动作做成轻量几何帧
-static void drawErrorIcon(uint8_t frame) {
-  thickLine(ICON_CX - 10, ICON_CY - 10, ICON_CX + 10, ICON_CY + 10, 3, C_ERROR);
-  thickLine(ICON_CX + 10, ICON_CY - 10, ICON_CX - 10, ICON_CY + 10, 3, C_ERROR);
-  pumpSerial();
-
-  if (frame == 0) return;
-  // 烟团只在图标区内轻轻上浮；最上缘不越过 y=20 的标题保护线。
-  int8_t lift = (int8_t)((frame & 1) ? 0 : 1);
-  tft.fillCircle(ICON_CX + 15, ICON_CY - 12 - lift, 2, DIM(C_ERROR));
-  tft.fillCircle(ICON_CX + 21, ICON_CY - 16 - lift, 1, C_ERROR);
-  tft.fillCircle(ICON_CX + 13, ICON_CY - 18 - lift, 1, C_ERROR);
+static void drawEyesHalf() {
+  tft.fillRect(EYE_L_X, EYE_Y + 4, EYE_SIZE, 4, C_INK);
+  tft.fillRect(EYE_R_X, EYE_Y + 4, EYE_SIZE, 4, C_INK);
   pumpSerial();
 }
 
-// 等待审批：感叹号加两条提示光芒，配合外框闪烁；参考 mini-alert 的警示动作
-static void drawNeedsIcon(bool raysOn) {
-  tft.fillRect(ICON_CX - 3, ICON_CY - 14, 6, 20, C_NEEDS);
-  tft.fillCircle(ICON_CX, ICON_CY + 13, 3, C_NEEDS);
-  uint16_t rayColor = raysOn ? C_NEEDS : C_BG;
-  tft.drawLine(ICON_CX - 10, ICON_CY - 9, ICON_CX - 14, ICON_CY - 13, rayColor);
-  tft.drawLine(ICON_CX + 10, ICON_CY - 9, ICON_CX + 14, ICON_CY - 13, rayColor);
+static void drawEyesWide() {
+  tft.fillRect(EYE_L_X, EYE_Y - 2, EYE_SIZE, EYE_SIZE + 4, C_INK);
+  tft.fillRect(EYE_R_X, EYE_Y - 2, EYE_SIZE, EYE_SIZE + 4, C_INK);
   pumpSerial();
 }
 
-static void drawNeedsBorder(bool on) {
-  uint16_t color = on ? C_NEEDS : C_BG;
-  tft.fillRect(0, 0, SCREEN_W, 2, color);
-  tft.fillRect(0, SCREEN_H - 2, SCREEN_W, 2, color);
-  tft.fillRect(0, 0, 2, SCREEN_H, color);
-  tft.fillRect(SCREEN_W - 2, 0, 2, SCREEN_H, color);
+static void drawEyesHappy() {
+  thickLine(EYE_L_X, EYE_Y + 6, EYE_L_X + 4, EYE_Y + 2, 2, C_INK);
+  thickLine(EYE_L_X + 4, EYE_Y + 2, EYE_L_X + 8, EYE_Y + 6, 2, C_INK);
+  thickLine(EYE_R_X, EYE_Y + 6, EYE_R_X + 4, EYE_Y + 2, 2, C_INK);
+  thickLine(EYE_R_X + 4, EYE_Y + 2, EYE_R_X + 8, EYE_Y + 6, 2, C_INK);
   pumpSerial();
 }
 
-// 失联：橙色 LOST 上方显示「信号断开」图标；没有直接对应的 SVG，就用两段无线波纹和斜杠。
-static void drawLostSignal(bool wavesOn) {
-  const int16_t x = ICON_CX - 18;
-  const int16_t y = LOST_SIGNAL_TOP;
-  // 小块也分片清，避免一次 SPI 写入长时间占住主循环。
-  tft.fillRect(x, y, 36, 8, C_LOST); pumpSerial();
-  tft.fillRect(x, y + 8, 36, 8, C_LOST); pumpSerial();
-  tft.fillRect(x, y + 16, 36, LOST_SIGNAL_H - 16, C_LOST); pumpSerial();
+static void drawEyesX() {
+  thickLine(EYE_L_X, EYE_Y, EYE_L_X + 7, EYE_Y + 7, 2, C_INK);
+  thickLine(EYE_L_X, EYE_Y + 7, EYE_L_X + 7, EYE_Y, 2, C_INK);
+  thickLine(EYE_R_X, EYE_Y, EYE_R_X + 7, EYE_Y + 7, 2, C_INK);
+  thickLine(EYE_R_X, EYE_Y + 7, EYE_R_X + 7, EYE_Y, 2, C_INK);
+  pumpSerial();
+}
 
-  if (wavesOn) {
-    tft.drawLine(ICON_CX - 12, y + 11, ICON_CX, y + 2, C_BG);
-    tft.drawLine(ICON_CX, y + 2, ICON_CX + 12, y + 11, C_BG);
-    tft.drawLine(ICON_CX - 7, y + 12, ICON_CX, y + 7, C_BG);
-    tft.drawLine(ICON_CX, y + 7, ICON_CX + 7, y + 12, C_BG);
-    tft.fillCircle(ICON_CX, y + 16, 2, C_BG);
+static void drawEyesClosed() {
+  tft.fillRect(EYE_L_X, EYE_Y + 4, EYE_SIZE, 3, C_INK);
+  tft.fillRect(EYE_R_X, EYE_Y + 4, EYE_SIZE, 3, C_INK);
+  pumpSerial();
+}
+
+// ── 状态道具（全部在 y=32..50 的道具区）──
+
+// 状态道具统一放在左上角，右上角留给常驻的连接图标。
+static void drawPropBang() {
+  tft.fillRect(16, 26, 4, 12, C_NEEDS);
+  tft.fillRect(16, 41, 4, 4, C_NEEDS);
+  pumpSerial();
+}
+
+static void drawPropCheck() {
+  thickLine(10, 34, 15, 40, 3, C_DONE);
+  thickLine(15, 40, 26, 28, 3, C_DONE);
+  tft.drawFastVLine(32, 26, 4, C_DONE);
+  tft.drawFastHLine(30, 28, 4, C_DONE);
+  pumpSerial();
+}
+
+static void drawPropCloud() {
+  tft.fillRoundRect(6, 26, 24, 8, 4, C_LOST);
+  tft.fillCircle(12, 28, 5, C_LOST);
+  tft.fillCircle(22, 27, 6, C_LOST);
+  tft.fillRect(10, 38, 2, 4, C_ERROR);
+  tft.fillRect(17, 38, 2, 4, C_ERROR);
+  tft.fillRect(24, 38, 2, 4, C_ERROR);
+  pumpSerial();
+}
+
+static void drawPropMonitor() {
+  tft.drawRoundRect(8, 26, 24, 14, 2, C_INTERACTIVE);
+  tft.drawFastHLine(16, 40, 8, C_INTERACTIVE);
+  tft.drawFastVLine(20, 40, 3, C_INTERACTIVE);
+  tft.fillRect(12, 30, 7, 2, C_INTERACTIVE);
+  tft.drawLine(34, 34, 40, 34, C_INTERACTIVE);
+  tft.drawLine(37, 31, 40, 34, C_INTERACTIVE);
+  tft.drawLine(37, 37, 40, 34, C_INTERACTIVE);
+  pumpSerial();
+}
+
+// 右上角常驻连接图标：三圈同心圆弧（上半圆）+ 下方中心点，不用折线。
+// 正常为青绿；LOST 时变灰蓝并加一道斜杠表示断开。
+static void drawLinkIcon(bool lost) {
+  uint16_t c = lost ? C_LOST : C_DONE;
+  for (uint8_t r = 3; r <= 9; r += 3) {
+    tft.drawCircle(116, 40, r, c);
   }
-  tft.drawLine(ICON_CX - 8, y + 17, ICON_CX + 8, y + 1, C_BG);
+  tft.fillRect(106, 41, 21, 10, C_BG);   // 只保留上半圆
+  tft.fillCircle(116, 40, 1, c);          // 圆弧下方的中心点
+  if (lost) tft.drawLine(109, 31, 123, 45, C_INK);
   pumpSerial();
 }
 
-// 失联：整屏变橙，上方信号断开图标，下方大大的 LOST
-static void drawLostScreen() {
-  fillScreenSliced(C_LOST);
-  drawLostSignal(true);
-  tft.setTextSize(4);                     // 放大四倍 = 每字 24×28 像素
-  tft.setTextColor(ST77XX_BLACK);
-  int16_t width = (int16_t)(4 * 6 * 4);
-  tft.setCursor((SCREEN_W - width) / 2, LOST_TEXT_TOP);
-  // 分两次打印：四个大字一次画完要 5 毫秒出头，超过「连续阻塞不超过 3 毫秒」
-  // 的纪律。拆成两个字母一组，中间收一次串口，最坏就只有 2.5 毫秒。
-  tft.print(F("LO"));
+// 笔记本电脑挡在身体下半，眼睛露在上面（还原 Clawd 的工作姿势）
+static void drawLaptop() {
+  tft.fillRect(41, 66, 46, 14, C_INK);            // 屏幕外框
+  tft.fillRect(43, 68, 42, 10, 0x2965);           // 屏幕深蓝
+  tft.fillRect(46, 70, 12, 2, C_DONE);            // 代码行
+  tft.fillRect(46, 73, 18, 2, C_DONE);
+  tft.fillRect(46, 76, 9, 2, C_DONE);
+  tft.fillRect(38, 80, 52, 4, 0x9492);            // 键盘底座
   pumpSerial();
-  tft.print(F("ST"));
+}
+
+// ── 正文气泡 ──
+
+static void drawBubbleFrame() {
+  tft.fillRoundRect(BUBBLE_X, BUBBLE_Y, BUBBLE_W, BUBBLE_H, 6, C_CARD);
+  tft.drawRoundRect(BUBBLE_X, BUBBLE_Y, BUBBLE_W, BUBBLE_H, 6, C_INK);
+  tft.drawRoundRect(BUBBLE_X + 1, BUBBLE_Y + 1,
+                    BUBBLE_W - 2, BUBBLE_H - 2, 5, C_INK);
+  pumpSerial();
+}
+
+static void drawBubbleTail() {
+  tft.fillTriangle(58, BUBBLE_Y, 70, BUBBLE_Y, 64, BUBBLE_Y - 6, C_CARD);
+  tft.drawLine(58, BUBBLE_Y, 64, BUBBLE_Y - 6, C_INK);
+  tft.drawLine(70, BUBBLE_Y, 64, BUBBLE_Y - 6, C_INK);
   pumpSerial();
 }
 
@@ -637,49 +588,52 @@ static uint16_t stateColor(PetState state) {
     case ST_DONE:      return C_DONE;
     case ST_ERROR:     return C_ERROR;
     case ST_LOST:      return C_LOST;
+    case ST_INTERACTIVE: return C_INTERACTIVE;
     case ST_IDLE:
     default:           return C_IDLE;
   }
 }
 
-// 把当前状态整屏画出来。只在**状态真的变了**的时候调用（动画不算）。
+// 把当前状态整屏画出来。只在**状态真的变了**的时候调用；画面全静态。
 static void renderState() {
-  if (currentState == ST_LOST) {
-    drawLostScreen();
-    return;
-  }
-
-  compactBody = needsCompactBody(msgBuf);
   fillScreenSliced(C_BG);
-
-  // 标题
   uint16_t color = stateColor(currentState);
+
   switch (currentState) {
-    case ST_WORKING:   printTitle(F("WORKING"), 7, color); break;
-    case ST_NEEDS_YOU: printTitle(F("APPROVE?"), 8, color); break;
-    case ST_DONE:      printTitle(F("DONE"), 4, color); break;
-    case ST_ERROR:     printTitle(F("ERROR"), 5, color); break;
+    case ST_WORKING:     printTitle(F("WORKING"), 7, C_INK); break;
+    case ST_NEEDS_YOU:   printTitle(F("APPROVE?"), 8, C_INK); break;
+    case ST_DONE:        printTitle(F("DONE"), 4, C_INK); break;
+    case ST_ERROR:       printTitle(F("ERROR"), 5, C_INK); break;
+    case ST_INTERACTIVE: printTitle(F("CHECK PC"), 8, C_INK); break;
     case ST_IDLE:
-    default:           printTitle(F("IDLE"), 4, color); break;
+    default:             printTitle(F("IDLE"), 4, C_INK); break;
   }
 
-  // 长文把大图标换成标题旁的小圆点，让正文独占下方区域。
-  // 动画也走同一分支，否则旧的图标清屏会擦掉上移后的文字。
-  if (compactBody) {
-    borderOn = true;
-    tft.fillCircle(HEADER_DOT_X, HEADER_DOT_Y, 3, color);
-    tft.drawFastHLine(BODY_MARGIN, 26, BODY_WIDTH, DIM(color));
-    if (currentState == ST_NEEDS_YOU) drawNeedsBorder(true);
-  } else switch (currentState) {
-    case ST_IDLE:      drawIdleIcon(); break;
-    case ST_WORKING:   drawWorkingIcon(); break;
-    case ST_NEEDS_YOU: borderOn = true; drawNeedsIcon(borderOn); drawNeedsBorder(true); break;
-    case ST_DONE:      drawDoneIcon(animPhase); break;
-    case ST_ERROR:     drawErrorIcon(animPhase); break;
-    default: break;
+  tft.fillRect(8, 12, 6, 6, color);                 // 状态色小方块
+  tft.fillRect(16, STATUS_LINE_Y, 96, 2, color);    // 状态色细线
+  pumpSerial();
+
+  // 需要人介入的状态：静态双线外框（不闪烁）
+  if (currentState == ST_NEEDS_YOU || currentState == ST_INTERACTIVE) {
+    tft.drawRect(0, 0, SCREEN_W, SCREEN_H, color);
+    tft.drawRect(1, 1, SCREEN_W - 2, SCREEN_H - 2, color);
+    pumpSerial();
   }
 
-  // 正文（命令摘要 / 错误信息 / 状态小字）
+  drawClawdBody();
+  switch (currentState) {
+    case ST_IDLE:        drawEyesOpen(); break;
+    case ST_WORKING:     drawEyesHalf(); drawLaptop(); break;
+    case ST_NEEDS_YOU:   drawEyesWide(); drawPropBang(); break;
+    case ST_DONE:        drawEyesHappy(); drawPropCheck(); break;
+    case ST_ERROR:       drawEyesX(); drawPropCloud(); break;
+    case ST_LOST:        drawEyesClosed(); break;
+    case ST_INTERACTIVE: drawEyesOpen(); drawPropMonitor(); break;
+  }
+  drawLinkIcon(currentState == ST_LOST);
+
+  drawBubbleFrame();
+  drawBubbleTail();
   if (msgBuf[0] != '\0') drawBodyText(msgBuf);
 }
 
@@ -687,10 +641,7 @@ static void renderState() {
 static void setState(PetState state) {
   if (state != ST_LOST) lastValidState = state;
   currentState = state;
-  animPhase = 0;
-  lastAnimMs = millis();
-  lastBlinkMs = lastAnimMs;
-  borderOn = false;
+  stateSince = millis();
   renderState();
 }
 
@@ -700,74 +651,6 @@ static void setStateFlash(PetState state, const char *flashText) {
   setState(state);
 }
 
-// 动画：只重画动的那一小块，不整屏刷新（整屏太慢，会丢串口数据）
-static void updateAnimation() {
-  unsigned long now = millis();
-  if (compactBody && currentState != ST_LOST) {
-    if ((currentState == ST_WORKING || currentState == ST_NEEDS_YOU) &&
-        now - lastBlinkMs >= BLINK_MS) {
-      lastBlinkMs = now;
-      borderOn = !borderOn;
-      uint16_t color = stateColor(currentState);
-      tft.fillCircle(HEADER_DOT_X, HEADER_DOT_Y, 3, borderOn ? color : DIM(color));
-      if (currentState == ST_NEEDS_YOU) drawNeedsBorder(borderOn);
-      pumpSerial();
-    }
-    return;
-  }
-  switch (currentState) {
-    case ST_IDLE:
-      if (now - lastAnimMs >= ANIM_FRAME_MS) {
-        lastAnimMs = now;
-        animPhase = (uint8_t)((animPhase + 1) & 0x0F);
-        clearIconArea();
-        drawIdleIcon();
-      }
-      break;
-    case ST_WORKING:
-      if (now - lastAnimMs >= ANIM_FRAME_MS) {
-        lastAnimMs = now;
-        animPhase++;
-        clearIconArea();
-        drawWorkingIcon();
-      }
-      break;
-    case ST_NEEDS_YOU:
-      if (now - lastBlinkMs >= BLINK_MS) {
-        lastBlinkMs = now;
-        borderOn = !borderOn;
-        clearIconArea();
-        drawNeedsIcon(borderOn);
-        drawNeedsBorder(borderOn);
-      }
-      break;
-    case ST_DONE:
-      if (animPhase < 4 && now - lastAnimMs >= DONE_FRAME_MS) {
-        lastAnimMs = now;
-        animPhase++;
-        clearIconArea();
-        drawDoneIcon(animPhase);
-      }
-      break;
-    case ST_ERROR:
-      if (now - lastAnimMs >= ERROR_FRAME_MS) {
-        lastAnimMs = now;
-        animPhase = (uint8_t)((animPhase + 1) & 0x03);
-        clearIconArea();
-        drawErrorIcon(animPhase);
-      }
-      break;
-    case ST_LOST:
-      if (now - lastAnimMs >= LOST_FRAME_MS) {
-        lastAnimMs = now;
-        animPhase++;
-        drawLostSignal((animPhase & 1) == 0);
-      }
-      break;
-    default:
-      break;
-  }
-}
 
 // ═══════════════════════════ 八、协议：解析一条消息 ═══════════════════════════
 
@@ -841,6 +724,10 @@ static void dispatchLine() {
     else if (strcmp(statusBuf, "working") == 0) setState(ST_WORKING);
     else if (strcmp(statusBuf, "done") == 0)    setState(ST_DONE);
     else if (strcmp(statusBuf, "error") == 0)   setState(ST_ERROR);
+    else if (strcmp(statusBuf, "interactive") == 0) {
+      beepStart(2, 35, 30);      // 两声短鸣：去电脑上答题
+      setState(ST_INTERACTIVE);  // 最后才重绘（铁律）
+    }
     else dbg(F("未知的状态值，已忽略"));
     return;
   }
@@ -876,8 +763,8 @@ static void dispatchLine() {
       msgBuf[toolLen + 1] = ' ';
     }
 
-    setState(ST_NEEDS_YOU);
-    beepStart(1, 120, 0);   // 提示音：响一声，告诉用户「该你了」
+    beepStart(3, 35, 30);   // 审批到达：三声短鸣，告诉用户「该你了」
+    setState(ST_NEEDS_YOU); // 最后才重绘屏幕（铁律：重绘会 pumpSerial）
     return;
   }
 
@@ -1015,18 +902,21 @@ static void checkWatchdog() {
     // lastValidState / msgBuf，等链路恢复了再拿回来用。
     ridBuf[0] = '\0';       // 审批请求作废：这期间按按钮也送不出去
     currentState = ST_LOST;
-    animPhase = 0;
-    lastAnimMs = millis();
+    stateSince = millis();
     renderState();
   } else if (!isLost && currentState == ST_LOST) {
     // 恢复。回到失联前的状态；但如果那是一条审批卡，就退回空闲 ——
     // 那张卡可能早就过期了，显示出来只会骗你去按一个没用的按钮。
-    PetState back = (lastValidState == ST_NEEDS_YOU) ? ST_IDLE : lastValidState;
+    PetState back = (lastValidState == ST_NEEDS_YOU ||
+                     lastValidState == ST_INTERACTIVE)
+                        ? ST_IDLE : lastValidState;
     setState(back);
   }
 
-  // 指示灯：链路正常才亮
-  digitalWrite(PIN_LED_STATUS, isLost ? LOW : HIGH);
+  // 指示灯：失联、有审批、或需要在电脑上答题时点亮，其余时间熄灭。
+  bool approvalPending = (ridBuf[0] != '\0');
+  bool needAttention = approvalPending || currentState == ST_INTERACTIVE;
+  digitalWrite(PIN_LED_STATUS, (isLost || needAttention) ? HIGH : LOW);
 }
 
 // ═══════════════════════════ 十二、启动与主循环 ═══════════════════════════
@@ -1041,7 +931,7 @@ void setup() {
   digitalWrite(PIN_BUZZER, LOW);   // 无源蜂鸣器空闲保持低电平，否则会一直响
 
   tft.initR(INITR_BLACKTAB);       // 黑排 1.77" 模块；花屏就换 INITR_GREENTAB / INITR_REDTAB
-  tft.setRotation(1);              // 横屏：160 宽 × 128 高
+  tft.setRotation(0);              // 竖屏：128 宽 × 160 高（倒置则改 2）
   tft.fillScreen(C_BG);
 
   vpLineInit(&rxLine);
@@ -1073,9 +963,16 @@ void loop() {
 
   // ③ 显示与交互
   checkWatchdog();
+
+  // DONE 只停留 3 秒：任务完成后自动回空闲，避免屏幕一直停在 DONE。
+  // 期间如果收到新状态，setState 会刷新 stateSince，这条自然不再触发。
+  if (currentState == ST_DONE && millis() - stateSince >= DONE_HOLD_MS) {
+    msgBuf[0] = '\0';      // 清掉「任务完成」等正文，避免 IDLE 挂着旧字
+    setState(ST_IDLE);
+  }
+
   scanButtons();
   beepService();
-  updateAnimation();
 
   delay(2);   // 让出一点时间，串口芯片和屏幕都喘口气
 }
