@@ -1,5 +1,9 @@
 # LED 指示灯与审批提示音改造 Implementation Plan
 
+> **执行后记（2026-10-27）**：本计划已执行。LED 现在在「失联 / 待审批 / 交互提醒」时点亮，
+> 审批到达三声短鸣；交互提醒、批准、拒绝各有独立提示音。真机已实测失联/恢复 LED、
+> Bash 批准/拒绝与 `PermissionRequest` 批准。计划里的 RAM 1286 等旧数字只代表执行当时。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让 D5 指示灯在「失联」与「有待审批」时点亮，把审批到达提示音改为三声短鸣，并完成 COM9 真机多类型审批联调。

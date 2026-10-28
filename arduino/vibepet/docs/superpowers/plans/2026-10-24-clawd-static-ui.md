@@ -1,5 +1,9 @@
 # Clawd 静态画面重设计 Implementation Plan
 
+> **执行后记（2026-10-27）**：本计划已执行。实际固件 Flash 30882/32256、RAM 1299/2048，
+> 七态静态画面、LED/蜂鸣器与 `DONE` 回退均已落地；正文实际为 4 行。计划里的旧数字
+> （如 29784/1286）只代表执行当时，现状以 `CLAUDE.md` 和固件为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 删除固件全部逐帧动画，用 Claude 吉祥物 Clawd 的珊瑚橙像素造型重做竖屏静态画面。
@@ -281,7 +285,7 @@ static void drawBubbleTail() {
 把现有 `drawBodyText(const char *text)` 替换为：
 
 ```c
-// 在气泡内按字折行：单行居中，多行左对齐，最多 3 行，超出用 .. 收尾。
+// 在气泡内按字折行：单行居中，多行左对齐，最多 4 行，超出用 .. 收尾。
 static void drawBodyText(const char *text) {
   const char *lineStart[BODY_LINES];
   const char *lineEnd[BODY_LINES];
@@ -458,14 +462,14 @@ python pc/bridge_daemon.py   # 后台
 ```text
 /state idle
 /state working 正在分析代码
-/state needs_you 要删缓存了
+/approval 删除缓存
 /state done 任务完成
 /state error 出错了
 /state interactive 请到电脑答题
 ```
 
 Expected: 每态静态画面正确；Clawd 宽扁身体、水平钳、四条腿；
-米白底与珊瑚橙对比清晰；道具不越界；气泡文字 3 行内。
+米白底与珊瑚橙对比清晰；道具不越界；气泡文字 4 行内。
 
 - [ ] **Step 3: DONE 回退与 LOST**
 

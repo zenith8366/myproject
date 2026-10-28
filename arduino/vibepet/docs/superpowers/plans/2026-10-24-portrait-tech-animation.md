@@ -1,5 +1,9 @@
 # 竖屏 + 科技动画 + 交互提醒 + DONE 回退 Implementation Plan
 
+> **执行后记（2026-10-27）**：本计划中的竖屏、第七态 `interactive`、`DONE` 回退、
+> 交互类工具豁免已经落地；**全部逐帧动画步骤已被同日 Clawd 静态画面方案取代**，
+> 不再按本计划恢复动画。当前实现以固件与 `CLAUDE.md` 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把 VibePet 改成竖屏 128×160，DONE 3 秒后回 IDLE，交互类工具改为「CHECK PC / 请到电脑答题」提醒动画，并把六态动画升级为科技精致风格。
@@ -941,7 +945,7 @@ python pc/bridge_daemon.py
 ```text
 /state idle
 /state working 正在分析代码
-/state needs_you 要删缓存了
+/approval 删除缓存
 /state done 任务完成
 /state error 出错了
 /state interactive 请到电脑答题

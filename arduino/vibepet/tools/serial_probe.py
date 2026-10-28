@@ -13,12 +13,16 @@ daemon：
 然后会看到一个交互界面（`>` 提示符），可以直接做这些事：
 
     /state working 正在分析代码     ← 让屏幕切到「工作中」并显示这行中文
-    /state needs_you 要删掉缓存了    ← 屏幕变黄 + 响一声
+    /approval 删除缓存               ← 发一条真正的审批请求：屏幕变黄 + 三声短鸣
     /approve                        ← 假装用户按了批准按钮（带当前 request_id）
     /deny
     /heartbeat                      ← 发一次心跳
     /raw {"type":"state"}           ← 原样发送（自己写完整 JSON 时用）
     直接敲一行 JSON 再回车也可以，会原样发过去
+
+注意：`needs_you` 只能由 `approval_request` 触发；发 `/state needs_you` 设备会
+当作未知状态忽略（固件只认 idle / working / done / error / interactive）。
+想看审批卡请用 `/approval`。
 
 设备回传的每一行都会带时间戳打印出来（按钮消息就是从这里看到的）。
 
@@ -123,9 +127,17 @@ def build_shortcut(parts, last_request_id):
     if command == "state" and len(parts) >= 2:
         return json.dumps({"type": "state", "status": parts[1],
                            "msg": " ".join(parts[2:])}, ensure_ascii=False)
+    if command == "approval":
+        # 设备只认 approval_request 触发的审批卡；request_id 固定 8 字符，
+        # 与固件的 RID_MAX=8 对齐。用秒数后三位，连续两次也不会撞得太快。
+        request_id = "probe%03d" % (int(time.time()) % 1000)
+        summary = " ".join(parts[1:]) or "测试命令"
+        return json.dumps({"type": "approval_request", "request_id": request_id,
+                           "tool": "Bash", "summary": summary},
+                          ensure_ascii=False)
     if command in ("approve", "deny"):
         if not last_request_id[0]:
-            log("还没见过 request_id —— 先发一条 /state needs_you 或审批请求")
+            log("还没见过 request_id —— 先发一条 /approval 或带 request_id 的审批请求")
             return None
         return json.dumps({"type": "button", "request_id": last_request_id[0],
                            "action": command})
@@ -170,7 +182,7 @@ def main():
                          args=(ser, stop_event, write_lock), daemon=True).start()
 
     print("=" * 60)
-    print("直接敲 JSON 回车发送；简写见 /state /approve /deny /heartbeat /raw")
+    print("直接敲 JSON 回车发送；简写见 /state /approval /approve /deny /heartbeat /raw")
     if args.no_heartbeat:
         print("（已关掉自动心跳：设备 5 秒后会切到 LOST）")
     else:

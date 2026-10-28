@@ -2,39 +2,42 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 当前状态：v3.0（UNO R3 + USB 串口）已实现，待上机联调
+## 当前状态：v3.0（UNO R3 + USB 串口）已上机跑通，待补真机观感与性能数字
 
-- **设计文档 v3.0**（`VibePet —— AI 编程助手物理状态显示与审批终端（USB 有线版）v3.0.md`，位于仓库根目录，文件名含中文、空格与全角破折号，引用时务必加引号）。它是**唯一权威规格**，开始任何实现前先读它。
-- **已实现并有验证**（2026-09-25）：
-  - `firmware/VibePet_UNO/`：UNO 固件、协议内核与字库。**编译零警告**，Flash 29784/32256（约 92%）、RAM 1286/2048（62%）
-  - `tools/gen_cn_font.py`：字库裁剪工具，`--verify` 黄金字形自检通过（`中` / `A` 逐位一致）
-  - `tools/test_proto.cpp`：固件端**离线测试（55 例：协议解析 + 字库取行）**，用 g++ 在电脑上跑，不需要硬件
-  - `pc/bridge_daemon.py` 的 `SerialTransport` + `pc/_smoke_test_serial.py`（9 例）
-  - Python 侧四套冒烟测试共 **49 例全通过**（`_smoke_test.py` 已扩到 12 例，含 PermissionRequest 与交互工具豁免用例）
-- **非 Bash 审批已接入**（2026-10-01）：`hook_client.py` 支持 `PermissionRequest` 事件（非 Bash 工具弹权限窗时触发），按 `decision.behavior` 输出决策（与 PreToolUse 的 `permissionDecision` 是两套格式，不能串）；配置已就绪、**待真机联调**（`.claude/settings.json` 的 9 个 hook 当前全部注释，联调时启用）。与 Clawd on Desk 并存的实测结论见 `.claude/README.md`
-- **屏幕已验证点亮**：`test-firmware/tfttest_uno` 在这块 UNO + 1.77" 屏上显示正常（用户实测）。
-- **状态动画更新**（2026-10-14）：六态采用局部几何动效，普通图标刷新区为 x=56..103、y=20..67，正文从 y=68 开始且不参与清屏；编译期检查会阻止图标区侵入标题或正文，`LOST` 动效限定在文字上方。新版本已烧录到 COM7；用户实机确认六态文字均可见，`APPROVE?` 与审批摘要单独保持 12 秒可见。长中文折行与缺字框仍待实测。
-- **审批键误触保护**（2026-10-14）：曾在无人触碰时收到 `deny`；诊断 sketch 读到空闲 D2/D3 均为 HIGH。固件已改为 LOW 连续稳定 35 ms 才接受、松开后重武装；12 秒审批卡保持测试无误拒。新去抖后的主动按键响应仍待单独确认。
-- **固件已烧录并跑起来**（2026-09-25，COM9）：设备上电/复位后会发 `{"type":"hello","fw":"uno/1.0"}`，串口 115200 收发正常、中文经探针发送不乱码。
-- **Hook 已启用并实测**（2026-09-25）：设备按批准 → 命令放行；按拒绝 → 报 `PreToolUse:Bash hook error: Denied by VibePet`、命令被拦下。按钮位置见 `.claude/README.md` 末尾的提醒。
-- **修掉一个实测中暴露的 bug**（2026-09-25）：多条审批挤在一起时「有的审批不显示」—— 审批进行中 daemon 仍会下发状态，把屏幕上的审批卡顶掉。已改为审批期间只记账不下发，回归测试是用例 14。
-- **尚未做**：屏幕显示内容的实机观感（六态、中文折行、空心方框降级）、看门狗 LOST 与恢复；设计文档里标「待实测」的性能数字；**非 Bash 审批的真机联调**，以及交互类工具（`AskUserQuestion` / `ExitPlanMode`）在设备审批下的行为确认（hook 的 allow 不足以跳过它们的原生交互，可能需要豁免）。
-- **LED / 蜂鸣器提示逻辑**（2026-10-24）：D5 指示灯改为「失联、待审批、交互提醒时亮」，其余时间熄灭；审批到达提示音由一声 120 ms 改为三声 35 ms 短鸣（仍复用非阻塞节奏机）。已实测失联/恢复 LED、Bash 批准/拒绝与 `PermissionRequest` 批准。
-- **竖屏与科技动效**（2026-10-24）：屏幕改为 128×160 竖屏（`setRotation(0)`）；`DONE` 3 秒后自动回 `IDLE`；新增第七态 `interactive`（`CHECK PC` / 「请到电脑答题」），`AskUserQuestion` / `ExitPlanMode` 不再占用设备审批，`hook_client` 先上报 `interactive` 再直接 allow。六态动画增加渐变、光晕与高光；星点与扫描线因 Flash 超限已裁剪。编译 Flash 32098/32256（99%）、RAM 1304/2048；离线 55/55、冒烟 12/14/14/9 全过；**真机联调待做**。
-- **Clawd 静态画面**（2026-10-24，取代上一条的动画设计）：删除全部逐帧动画，改为全静态绘制；以 Claude Code 吉祥物 **Clawd**（珊瑚橙像素螃蟹：宽扁身体、水平细钳、四条细腿）为核心，米白底 + 经典橘 + 对话气泡，七态用表情与道具区分。编译 Flash **30392/32256（94%，余 1864 B）**、RAM 1293/2048；离线 55/55、冒烟 12/14/14/9 全过；**真机观感待确认**。
-- **v2.0 遗留已清理**（2026-09-25）：删掉了 `firmware/VibePet/`（901 行 ESP32 固件）、`vendor/TFT_eSPI/`（274 个文件，占仓库跟踪文件数的 94%）、`firmware/TFT_eSPI_User_Setup.h`、`test-firmware/tft_probe{,2}/`。仓库跟踪文件从 295 个降到 17 个，只剩有线版一条路线；要查旧实现请翻 git 历史。
+**当前事实（2026-10-27 核对）**
+
+- **设计文档 v3.0**（`VibePet —— AI 编程助手物理状态显示与审批终端（USB 有线版）v3.0.md`，位于仓库根目录，文件名含中文、空格与全角破折号，引用时务必加引号）。它是**唯一权威规格**；若与代码冲突，改文档或改代码，不要让两套说法并存。
+- **固件** `firmware/VibePet_UNO/`：UNO 固件、协议内核与字库。**编译零警告**，Flash **30882/32256（约 96%，余 1374 B）**、RAM **1299/2048（约 63%，余 749 B）**。字库 **394 字**（95 个 ASCII + 299 个汉字），实测符号 **9062 B**（位图 7880 + 码点表 788 + 步进表 394）。
+- **电脑端测试**：四套冒烟测试共 **49 例**（12/14/14/9），全部不依赖硬件；固件端离线测试 **55 例**（协议解析 + 字库取行），g++ 编译即跑。两组合计 **104 例**。
+- **实机已验证**：`test-firmware/tfttest_uno` 点亮屏幕；主固件烧录后串口 115200 收发正常、`hello` 正常；Bash 审批的**批准与拒绝**路径实测通过；`PermissionRequest` 的批准路径实测通过；失联/恢复 LED、审批 LED、35 ms 去抖、审批卡不被状态顶掉均有实测记录。三声短鸣已实现，真机听感建议在下次联调时再确认一遍。
+- **最新画面**：2026-10-24 起改为 **Clawd 全静态七态**（IDLE / WORKING / APPROVE? / DONE / ERROR / LOST / CHECK PC），竖屏 128×160、米白底、对话气泡、正文最多 4 行。**最新画面的真机观感、长中文折行、缺字框仍待确认**。
+- **Hook 配置**：`.claude/settings.json` 的 **9 个事件全部启用**（2026-10-24 起）：`PreToolUse` + `PermissionRequest` 审批，7 个状态上报。Codex 走 `.codex/hooks.json` + `pc/codex_hook.py`，复用同一个 daemon。
+- **尚未做**：设计文档里标「待实测」的性能数字（状态刷新、按钮响应、8 小时稳定性）；LOST 画面的完整真机观感；长中文折行与缺字框；`PermissionRequest` 的拒绝路径与更多工具类型；与 Clawd on Desk 并行审批在设备在线时的完整验证；多会话 FIFO 队列；外壳 3D 打印。
+
+**历史沿革（只记影响当前设计的节点；旧说法已被新节点取代）**
+
+- 2026-09-15 起：项目从文档开始，约 6 周、56 次提交。
+- 2026-09-25：从 ESP32 + BLE 改为 **UNO + USB 有线**；屏幕点亮、固件烧录、Hook 批准/拒绝实测。
+- 2026-10-01：接入 `PermissionRequest`（非 Bash 审批）；发现「审批卡被状态顶掉」并修复，回归测试是 `_smoke_test_daemon.py` 的用例 14。
+- 2026-10-14：加入六态轻量动效与 35 ms 稳定按键滤波（曾出现无人触碰却收到 `deny`，诊断为空闲 D2/D3 均为 HIGH）。**动画后来被 2026-10-24 的静态画面取代**，但去抖逻辑保留。
+- 2026-10-24：先做竖屏 + 第七态 `interactive` + LED/蜂鸣器 + `DONE` 3 秒回 `IDLE`；随后**删除全部逐帧动画**，改为 Clawd 静态七态（动画版曾把 Flash 顶到 32098/32256）。LED/蜂鸣器语义保留。
+- 2026-10-27：文档全面对齐代码；修正 LOST 仍绘制旧正文、恢复为 `IDLE` 时旧审批摘要残留的问题（需真机复验）；串口探针新增 `/approval` 简写。
+- **v2.0 遗留已清理**（2026-09-25）：删掉了 `firmware/VibePet/`（901 行 ESP32 固件）、`vendor/TFT_eSPI/`（274 个文件，占仓库跟踪文件数的 94%）、`firmware/TFT_eSPI_User_Setup.h`、`test-firmware/tft_probe{,2}/`。仓库跟踪文件从 295 个降到 17 个（后来加入设计与测试记录，当前 34 个），只剩有线版一条路线；要查旧实现请翻 git 历史。
 
 ## 仓库现状
 
-- `pc/hook_client.py` —— Hook 客户端（短生命周期），仅用标准库。两条行为完全不同的路径：`PreToolUse` / `PermissionRequest` 审批（阻塞、按事件各自的格式输出决策）与其余事件的状态上报（非阻塞、stdout 零输出）。**与传输方式无关**（v2.0→v3.0 的传输换代没改一行；2026-10-01 为接入 PermissionRequest 扩展了事件分派与输出格式）
+- `pc/hook_client.py` —— Claude Code Hook 客户端（短生命周期），仅用标准库。两条行为完全不同的路径：`PreToolUse` / `PermissionRequest` 审批（阻塞、按事件各自的格式输出决策）与其余事件的状态上报（非阻塞、stdout 零输出）。**与传输方式无关**（v2.0→v3.0 的传输换代没改一行；2026-10-01 为接入 PermissionRequest 扩展了事件分派与输出格式）
+- `pc/codex_hook.py` —— Codex Hook 适配器（短生命周期）。复用 `hook_client.py` 的审批与状态函数，只额外处理 Codex 的差异：`Stop` 等生命周期事件必须输出 `{}`；**不挂 `PreToolUse`**（Codex 会对每次匹配的工具调用都触发，而不只是需要权限时）
 - `pc/bridge_daemon.py` —— 桥接守护进程（常驻）。传输层是**鸭子类型的 4 方法契约**（`set_line_handler` / `connected` 属性 / `async ensure_connected` / `async send_line`），`Bridge` 与全部审批逻辑对此无感；`SerialTransport` 是串口实现（后台线程读 + `call_soon_threadsafe` 送回事件循环）
 - `firmware/VibePet_UNO/` —— UNO 固件与协议内核（**注释是写给新手看的，见下方说明**）
-- `pc/_smoke_test.py`（10 例）、`pc/_smoke_test_daemon.py`（14 例）、`pc/_smoke_test_state.py`（14 例）、`pc/_smoke_test_serial.py`（9 例）—— 冒烟测试，**均不依赖硬件**（各自用 8790 / 8770 / 8771 这类**专用端口**，所以可以在真 daemon 常驻的同时跑）
+- `pc/_smoke_test.py`（12 例）、`pc/_smoke_test_daemon.py`（14 例）、`pc/_smoke_test_state.py`（14 例）、`pc/_smoke_test_serial.py`（9 例）—— 冒烟测试，**均不依赖硬件**（各自用 8790 / 8770 / 8771 这类**专用端口**，所以可以在真 daemon 常驻的同时跑）
 - `tools/test_proto.cpp` —— 固件端离线测试（55 例：协议解析 + 字库取行），g++ 编译即跑，**也不需要硬件**
 - `test-firmware/tfttest_uno/tfttest_uno.ino` —— **UNO + ST7735 的接线与库用法权威参考**（Adafruit_GFX + Adafruit_ST7735，引脚 CS=D10 / DC=D9 / RES=D8 / SCK=D13 / MOSI=D11 / 背光→3.3V）。主固件的显示部分照它写，且已实测点亮
 - `tools/cn_charset.txt` —— 字库字集清单；`tools/gen_cn_font.py` —— 字库裁剪工具
 - `README.md` —— **面向使用者**的文档（安装 / 日常使用 / 排障），受众与 CLAUDE.md 不同。改了用户可见的行为（命令行参数、状态含义、接线、安装步骤）要同步更新它
 - `.claude/settings.json` —— Claude Code Hook 配置（**9 个事件：`PreToolUse` + `PermissionRequest` 做审批、7 个状态上报**，每个都带显式 `timeout`）。**当前 9 个 hook 已启用**（2026-10-24 起）。启用与关闭方式、Clawd on Desk 并行审批的实测结论见 `.claude/README.md`
+- `.codex/hooks.json` —— Codex Hook 配置（5 个事件：`PermissionRequest` 审批 + 4 个状态上报；不挂 `PreToolUse`）。它只在 Codex 会话的工作目录位于本仓库时加载
+- `docs/superpowers/{specs,plans}/` —— 2026-10-24 的设计与实施记录，**是历史档案，不是当前规格**；与代码冲突时以代码和设计文档 v3.0 为准。最新一版画面（Clawd 静态）以 `2026-10-24-clawd-static-ui-design.md` 为设计起点，但精确坐标已按实现调整
 
 **注释密度是刻意的，不要删**：`pc/hook_client.py`、`pc/bridge_daemon.py`、`firmware/VibePet_UNO/VibePet_UNO.ino` 三个核心文件的注释是写给新手看的（每个函数前有一段大白话说明「这段在干嘛、为什么需要它」），密度高于一般工程代码。这是本项目目标读者（没写过嵌入式 / 异步程序的人）决定的 —— **不要以「注释太多/太啰嗦」为由删减**。
 
@@ -50,8 +53,9 @@ python pc/_smoke_test_serial.py    # 串口传输层：9 例，注入假串口�
 # 上机调试：串口探针（手工给设备发 JSON，相当于 v2.0 时代的 nRF Connect）
 # 用它之前先停掉 daemon；打开串口会让板子复位，等约 2 秒
 python tools/serial_probe.py COM9
-#   /state working 正在分析代码     /state needs_you 要删缓存了
+#   /state working 正在分析代码     /approval 要删缓存了
 #   /approve  /deny  /heartbeat  /raw {"type":"state"}
+#   注意：needs_you 只能由 approval_request 触发；/state needs_you 会被固件忽略
 #   直接敲一行 JSON 回车也行；设备回传的每一行都会带时间戳打印出来
 #   它会自动每 2 秒发一次心跳（否则屏幕 5 秒就翻成 LOST）；想看 LOST 加 --no-heartbeat
 
@@ -61,7 +65,7 @@ g++ -I tools/proto_test -I firmware/VibePet_UNO tools/test_proto.cpp -o /tmp/pro
   && /tmp/proto_test               # 55 例：转义、嵌套、UTF-8 边界、行重组、字库取行
 
 # 语法检查
-python -m py_compile pc/hook_client.py pc/bridge_daemon.py
+python -m py_compile pc/hook_client.py pc/bridge_daemon.py pc/codex_hook.py
 
 # ── 编译固件（arduino:avr 核心 1.8.8，开发板 Arduino Uno）──
 # ★ -DSERIAL_RX_BUFFER_SIZE=256 不能省：AVR 默认串口接收缓冲只有 64 字节，
@@ -84,7 +88,7 @@ CLI="/d/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
   --upload -p COM7 firmware/VibePet_UNO
 
 # ── 验证 -D 真的生效了：看 RAM 数字 ──
-#   带 -D：Global variables ≈ 1286 字节（RX 256 + TX 64，含按键滤波状态）
+#   带 -D：Global variables ≈ 1299 字节（RX 256 + TX 64，含按键滤波状态）
 #   不带：Global variables ≈ 1090 字节（RX 64）  ← 数字不对说明标志没生效
 #
 # 为什么必须显式给 --build-path：arduino-cli 会缓存核心库（HardwareSerial 等）
@@ -135,7 +139,7 @@ Arduino UNO R3 固件 VibePet_UNO.ino   Adafruit_ST7735 + 自制 12px 中文子�
 
 最核心的设计决策是**短生命周期的 hook_client 与常驻 daemon 分离**：串口连接必须由 daemon 独占管理（其他程序抢不到端口；且打开串口会让开发板复位，无法承受每次 Hook 调用都来一次）。hook_client 每次只做一次 socket 往返，且必须在 daemon 缺席时安全降级而非崩溃。
 
-设备端是**单任务协作式调度**：全程不占用中断（`tone()` 用 Timer2 是唯一例外），串口字节由硬件 USART 中断搬进环形缓冲，主循环负责解析、看门狗、按钮扫描与动画。**任何一处连续阻塞都不许超过 3 ms**（详见设计文档 5.6，这是不丢行的前提）。
+设备端是**单任务协作式调度**：全程不占用中断（`tone()` 用 Timer2 是唯一例外），串口字节由硬件 USART 中断搬进环形缓冲，主循环负责解析、看门狗、按钮扫描与整屏绘制。**任何一处连续阻塞都不许超过 3 ms**（详见设计文档 5.6，这是不丢行的前提）。
 
 ## 通信协议（硬契约，任何改动必须两端同步）
 
@@ -160,21 +164,21 @@ USB 串口 115200 8N1（设备的 D0/D1，经板载 USB 转串口芯片枚举为
 
 `hello` 是 v3.0 新增的**开机问候**：设备每次复位（上电、按复位键、**电脑端打开串口导致的自动复位**、重新烧录）后发一条，daemon 收到就补发当前画面。复位不会断开串口，所以没有它就探测不到「设备重跑了一遍 setup()」。
 
-**行长是硬约束**：整行 UTF-8 ≤ **320 字节**（固件 `LINE_MAX`，超长整条丢弃、不会把半截行当消息处理）；电脑端单字段 `summary`/`msg` ≤ **160 字节**、`tool` ≤ **24 字节**，截断必须走 `clamp_bytes()`（按 UTF-8 边界，不切碎汉字）。
+**行长是硬约束**：整行 UTF-8 ≤ **320 字节**（固件 `VP_LINE_MAX`，超长整条丢弃、不会把半截行当消息处理）；电脑端单字段 `summary`/`msg` ≤ **160 字节**、`tool` ≤ **24 字节**，截断必须走 `clamp_bytes()`（按 UTF-8 边界，不切碎汉字）。
 
 **为什么是 320 而不是更小**：`approval_request` 的骨架开销约 66 字节 + request_id(8) + tool(24) + summary(160) = 最坏 258 字节。若上限收到 256，带长工具名（如 `mcp__github__create_issue`）的请求会被整条**静默丢弃** —— 屏幕空白、120 秒后超时拒绝，而电脑端全程不知道。
 
-六种状态值（`status` 字段的取值域）：
+七种状态值（`status` 字段的取值域；全部为**静态画面**，只在状态切换时重绘）：
 
 | 状态值 | 颜色 | 屏幕效果 |
 |---|---|---|
-| `idle` | 白 | 呼吸小宠物 + "IDLE" |
-| `working` | 绿 | 跑动光标与键盘 + "WORKING" |
-| `needs_you` | 黄 | 感叹号提示、闪烁边框 + "APPROVE?" + 命令摘要 |
-| `done` | 青 | 逐段出现的对勾与闪光 + "DONE" |
-| `error` | 红 | 叉号旁烟团轻动 + "ERROR" + 错误信息 |
-| `heartbeat_lost` | 橙 | 断线信号图标轻闪 + "LOST" 大字 |
-| `interactive` | 蓝紫 | 显示器动画 + "CHECK PC" + "请到电脑答题" |
+| `idle` | 白 | Clawd 方块眼 + "IDLE" |
+| `working` | 绿 | 半睁眼 + 笔记本电脑 + "WORKING" |
+| `needs_you` | 黄 | 睁大眼 + 感叹号 + 静态双线外框 + "APPROVE?" + 命令摘要 |
+| `done` | 青 | 笑眼 + 对勾与闪光点 + "DONE"（3 秒后自动回 `idle`） |
+| `error` | 红 | 叉眼 + 乌云与雨点 + "ERROR" + 错误信息 |
+| `heartbeat_lost` | 橙 | 闭眼 + 断线符号 + "LOST" |
+| `interactive` | 蓝紫 | 方块眼 + 小显示器 + "CHECK PC" + "请到电脑答题" |
 
 ## Hook 事件 → 状态映射
 
@@ -207,6 +211,11 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 **设备可见的中文文案受字库约束**：改了上表里的中文（比如把「思考中」改成「正在思考」），
 必须把新字加进 `tools/cn_charset.txt` 并重新生成 `cn_font.h`，否则屏幕上显示的是空心方框。
 
+**Codex 的入口不同**：Codex 走 `.codex/hooks.json` → `pc/codex_hook.py`，复用
+`hook_client.py` 的 `handle_approval_event()` / `handle_status_event()`。它只挂
+`PermissionRequest`，不挂 `PreToolUse`（Codex 会对每次匹配的工具调用都触发，而不只是
+需要权限时）；`Stop` 等生命周期事件必须输出 `{}`，否则 Codex 会认为 Hook 没有返回结果。
+
 ## 时序与常量
 
 | 常量 | 值 | 位置 |
@@ -216,10 +225,11 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 | 按钮去抖 | LOW 稳定 35 ms，松开后重新武装 | 设备端 `BUTTON_STABLE_MS` |
 | 审批超时 | 120 s（可配置） | daemon，超时返回 `deny` |
 | 本地 Socket | `127.0.0.1:8765` | `hook_client.py` ↔ daemon |
-| 动画刷新 | ~50 ms | 设备端主循环 |
+| 主循环节拍 | ~2 ms | 设备端 `loop()` 末尾 `delay(2)` |
+| DONE 停留 | 3 s | 设备端 `DONE_HOLD_MS`，之后回 `IDLE` |
 | boot grace | ~2.0 s | daemon：打开串口后等 bootloader 走完，期间 `connected` 为 False |
 | 串口波特率 | 115200 | 两端一致 |
-| BLE 行上限 | 320 字节 | 设备端 `LINE_MAX`，超长整条丢弃 |
+| 整行上限 | 320 字节 | 设备端 `VP_LINE_MAX`，超长整条丢弃 |
 | 单字段上限 | 160 / 24 字节 | daemon `MAX_FIELD_BYTES` / `MAX_TOOL_BYTES` |
 | 单次连续阻塞 | ≤ 3 ms | 设备端纪律（见设计文档 5.6） |
 
@@ -258,13 +268,13 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 - **`request_id` 一一对应**。daemon 为每次审批生成唯一 id 并只接受当前等待中的那个，设备回传时必须原样带回。目的是让迟到按钮（上一次审批超时后才按下）不会误批准下一次请求。
 - **降级方向一律是拒绝**。审批超时 → `deny`；daemon 连接失败 / 超时 / 解析失败 → `deny`。任何异常都不得让 Hook 崩溃或放行。
 - **按钮按下后设备端立即本地切画面**（批准 → `working`/“已批准”，拒绝 → `idle`/“已拒绝”）并作废 `request_id`，不依赖电脑端回话。daemon 的去重模型是「记账 + dirty」（`_last_state` / `_state_dirty`），重连后由 `resend_current()` 补发当前画面：审批进行中重发审批卡（**沿用原 request_id**），否则重发最后一条 state。
-- **LOST 恢复语义**：恢复到最后有效状态；若那是 `needs_you` 则恢复为 `idle`（审批请求可能已超时失效，不显示过期卡片）。进入 LOST 时清空 `request_id`，失联期间按键不回传。
+- **LOST 恢复语义**：恢复到最后有效状态；若那是 `needs_you` 或 `interactive` 则恢复为 `idle`（审批请求/交互提醒可能已失效，不显示过期卡片），并清掉旧正文。进入 LOST 时清空 `request_id`，失联期间按键不回传；LOST 画面本身不绘制正文。
 - **审批进行中不下发状态**（daemon `send_state` 里的那条提前返回）：单槽审批（F9）期间屏幕上停着审批卡，此时任何状态更新都**只记账、不下发**。原因见下面这条实测 bug —— 它的回归测试是 `pc/_smoke_test_daemon.py` 的用例 14。
   > **实测踩过的坑**：一条命令被批准后，Claude Code 立刻触发 `PostToolUse` 上报「working / Bash 完成」；若此刻屏幕上正停着**下一条**审批的卡片，这条状态就会把卡片顶掉 —— 用户看到的是 WORKING，根本不知道还有审批在等，那条只能静默超时被拒。症状是「多条审批挤在一起时，有的审批不显示」。
 - **同一时间只处理一个审批请求**（单槽 `current_request_id`，需求 F9）。多会话 FIFO 队列属于可扩展方向，不在第一版。
 - **设备端禁用清单**（每一条都会直接吃掉 2 KB RAM / 32 KB Flash 的预算）：`String` 类、ArduinoJson、任何 `malloc`/`new`、`float`/`double` 与 `sin()`/`sqrt()` 等浮点函数、裸字符串字面量（必须用 `F("...")` 放回 Flash）、循环里的 `delay()`。
-- **中文显示**：正文用自制 12px 子集字库（`firmware/VibePet_UNO/cn_font.h`，从 U8g2 的文泉驿点阵宋体裁出 **390 字**（95 个 ASCII + 295 个汉字），12×13 点阵、20 字节位图 + 2 字节索引 + 1 字节步进宽，**每个字约 23 字节 Flash**，合计约 9 KB）；标题类大字用 Adafruit_GFX 内置字体放大 2 倍。**未收录的字形画 12×13 空心方框**，不显示乱码也不静默省略。ASCII 与汉字走同一张表、同一套绘制路径。
-  **取行用 `cnFontRow()` —— 它在 `cn_font.h` 里，由生成工具一并生成**（这样离线测试能验证同一份代码）。两个必须记住的约定：**位序上「返回值的第 c 位就是第 c 列」，位 0 是最左**（写成 `0x800 >> c` 会读到镜像的列，整字左右翻转）；**字形索引要用 16 位**（字库 390 字，用 `uint8_t` 会把索引 ≥ 256 的字截断成别的字）。这两条都踩过，`tools/test_proto.cpp` 里有对应的回归测试。
+- **中文显示**：正文用自制 12px 子集字库（`firmware/VibePet_UNO/cn_font.h`，从 U8g2 的文泉驿点阵宋体裁出 **394 字**（95 个 ASCII + 299 个汉字），12×13 点阵、20 字节位图 + 2 字节码点 + 1 字节步进宽，**每个字约 23 字节 Flash**，实测符号 9062 B（约 9.1 KB））；标题类大字用 Adafruit_GFX 内置字体放大 2 倍。**未收录的字形画 12×13 空心方框**，不显示乱码也不静默省略。ASCII 与汉字走同一张表、同一套绘制路径。
+  **取行用 `cnFontRow()` —— 它在 `cn_font.h` 里，由生成工具一并生成**（这样离线测试能验证同一份代码）。两个必须记住的约定：**位序上「返回值的第 c 位就是第 c 列」，位 0 是最左**（写成 `0x800 >> c` 会读到镜像的列，整字左右翻转）；**字形索引要用 16 位**（字库 394 字，用 `uint8_t` 会把索引 ≥ 256 的字截断成别的字）。这两条都踩过，`tools/test_proto.cpp` 里有对应的回归测试。
 - **设备端单行缓冲的两条铁律**（都在 `firmware/VibePet_UNO/` 里，改代码前先读那里的注释）：
   ① 一条消息处理完只摘 `ready` 旗，**绝不清空行缓冲的长度** —— 处理一条消息可能重绘整屏几十毫秒，这期间串口会收进下一条消息的开头，清掉就等于把它截断丢弃（`vibepet_proto.h` 的 `vpLineConsume`）；
   ② 派发函数里**先把字段全部取进局部变量，最后才调用会重绘屏幕的函数**（如 `setState`）—— 因为渲染循环里会 `pumpSerial()`，新字节就写在正在解析的那个缓冲上。
@@ -284,7 +294,7 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 
 **编译参数不能少**：`--build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256"`（理由见「常用命令」的注释）。
 
-**主频必须与实物一致**：`arduino:avr:uno` 假定 16 MHz。若板子实际是 8 MHz，必须改用 `arduino:avr:pro:cpu=8MHzatmega328`，否则串口波特率偏一半、**每个字节都是乱码**。判断方法：烧录 `test-firmware/uno_link` 看串口输出是否可读。
+**主频必须与实物一致**：`arduino:avr:uno` 假定 16 MHz。若板子实际是 8 MHz，必须改用 `arduino:avr:pro:cpu=8MHzatmega328`，否则串口波特率偏一半、**每个字节都是乱码**。判断方法：烧录主固件，用串口监视器（115200）看开机输出的 `{"type":"hello","fw":"uno/1.0"}` 是否可读。
 
 **烧录前必须先停掉 daemon**，否则串口被占用，上传会失败（daemon 会报「端口被占用」）。同理，调试设备时不要同时开着串口监视器。
 
@@ -294,6 +304,6 @@ Claude Code 各工具的 `tool_response` 结构并不统一，也没有稳定的
 
 设计文档 8.3 规定自底向上分步验证，**每步通过后再进入下一步**，不要在链路未验证时联调：
 
-TFT 点亮（先跑 `test-firmware/tfttest_uno` 例程）→ 串口自检（`test-firmware/uno_link`，115200 不乱码）→ 单行 JSON 能改画面 → 中文能显示（含折行与未收录字）→ 按钮能回传 → 看门狗/LOST 恢复 → daemon 独立测试 → hook_client 命令行测试 → 接入 Claude Code Hook 端到端。
+TFT 点亮（先跑 `test-firmware/tfttest_uno` 例程）→ 串口自检（主固件的 `hello`，115200 不乱码）→ 单行 JSON 能改画面 → 中文能显示（含折行与未收录字）→ 按钮能回传 → 看门狗/LOST 恢复 → daemon 独立测试 → hook_client 命令行测试 → 接入 Claude Code Hook 端到端。
 
 **屏幕点亮之前不要写任何应用代码** —— v2.0 就是在这块屏上卡住的（背光亮、无画面），换库换脚都没解决。先按设计文档 4.7.2 的供电方案 A/B 与初始化序列逐个排除。

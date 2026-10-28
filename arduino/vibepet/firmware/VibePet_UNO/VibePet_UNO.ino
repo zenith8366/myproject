@@ -38,19 +38,22 @@
  *     · 蜂鸣器要**非阻塞**（老版本用 delay 等响完，在这里会直接丢消息）
  *   这两处的代码里都有注释说明。
  *
- * ━━━━━━━━━━━━━━━ 屏幕长什么样（128×160 竖屏）━━━━━━━━━━━━━━━
+ * ━━━━━━━━━━━━━━━ 屏幕长什么样（128×160 竖屏，全静态）━━━━━━━━━━━━━━━
  *
- *      +------------------------------------------+  ← 闪烁边框（等待审批时）
- *      |                 APPROVE?                 |  ← 标题：内置字体的两倍大
- *      |                                          |
- *      |                 (图标区域)                |  ← 六态轻量动画；不清正文
- *      |                                          |
- *      |          Bash: rm -rf /tmp/build         |  ← 正文：12 像素中文字库，自动折行
- *      |          短文保留图标，长文自动扩大正文区        |
+ *      +------------------------------------------+  ← 需要人介入时：静态双线外框
+ *      |                 APPROVE?                 |  ← 标题：内置字体放大两倍
+ *      |                  [ ! ]                   |  ← 状态道具：感叹号/对勾/乌云…
+ *      |            ▄██████████▄                  |  ← Clawd：珊瑚橙像素螃蟹
+ *      |           ▐ ██    ██ ▌   ██ ██ ██        |  ← 眼睛、钳子、四条腿
+ *      |          ┌────────────────────┐          |
+ *      |          │ Bash: rm -rf ...   │          |  ← 气泡正文：12px 中文字库
+ *      |          │ 每行约 9 个汉字    │          |     最多 4 行，超出用 ..
+ *      |          └────────────────────┘          |
  *      +------------------------------------------+
  *
- * 长文本改用紧凑标题栏：图标缩成标题左侧的小圆点，正文左对齐、最多五行，
- * 每行之间留 5 像素；超出才用 .. 收尾，不把字号越缩越小。
+ * 七种状态（IDLE / WORKING / APPROVE? / DONE / ERROR / LOST / CHECK PC）靠
+ * Clawd 的表情和头顶道具区分，画面只在状态切换时重绘一次，没有逐帧动画。
+ * 正文放在对话气泡里，最多 4 行、每行约 9 个汉字；超出才用 .. 收尾。
  *
  * ━━━━━━━━━━━━━━━ 和设计文档的关系 ━━━━━━━━━━━━━━━
  *
@@ -147,7 +150,7 @@
 
 // ═══════════════════════════ 二、全局状态 ═══════════════════════════
 
-// 六种状态（设计文档 3.3）。LOST 是设备自己判断的，其余五种来自电脑端。
+// 七种状态（设计文档 3.3）。LOST 是设备自己判断的，其余六种来自电脑端。
 enum PetState { ST_IDLE, ST_WORKING, ST_NEEDS_YOU, ST_DONE, ST_ERROR, ST_LOST,
                 ST_INTERACTIVE };
 
@@ -361,7 +364,7 @@ static const char *bodyLine(const char *start, const char **end, uint16_t *lineW
   return cursor;
 }
 
-// 在气泡内按字折行：单行居中，多行左对齐，最多 3 行，超出用 .. 收尾。
+// 在气泡内按字折行：单行居中，多行左对齐，最多 BODY_LINES（4）行，超出用 .. 收尾。
 //
 // 折行必须**按字**而不是按字节：一个汉字 3 字节，从中间切开就会出乱码。
 static void drawBodyText(const char *text) {
@@ -634,7 +637,9 @@ static void renderState() {
 
   drawBubbleFrame();
   drawBubbleTail();
-  if (msgBuf[0] != '\0') drawBodyText(msgBuf);
+  // 失联画面不画正文：这时 msgBuf 里可能还留着上一条审批摘要，画出来会
+  // 让人误以为那张卡还有效。恢复时的清空见 checkWatchdog()。
+  if (currentState != ST_LOST && msgBuf[0] != '\0') drawBodyText(msgBuf);
 }
 
 // 状态切换的唯一入口。所有地方都从这里改状态，免得漏掉重绘或记账。
@@ -898,8 +903,8 @@ static void checkWatchdog() {
   bool isLost = (millis() - lastHeartbeat) > WATCHDOG_TIMEOUT;
 
   if (isLost && currentState != ST_LOST) {
-    // 进入失联。**不走 setState** —— 失联画面不显示正文，而且我们要保住
-    // lastValidState / msgBuf，等链路恢复了再拿回来用。
+    // 进入失联。**不走 setState** —— 要保住 lastValidState / msgBuf，
+    // 等链路恢复了再拿回来用。renderState() 在 ST_LOST 下不会画正文。
     ridBuf[0] = '\0';       // 审批请求作废：这期间按按钮也送不出去
     currentState = ST_LOST;
     stateSince = millis();
@@ -907,9 +912,10 @@ static void checkWatchdog() {
   } else if (!isLost && currentState == ST_LOST) {
     // 恢复。回到失联前的状态；但如果那是一条审批卡，就退回空闲 ——
     // 那张卡可能早就过期了，显示出来只会骗你去按一个没用的按钮。
-    PetState back = (lastValidState == ST_NEEDS_YOU ||
-                     lastValidState == ST_INTERACTIVE)
-                        ? ST_IDLE : lastValidState;
+    bool staleCard = (lastValidState == ST_NEEDS_YOU ||
+                      lastValidState == ST_INTERACTIVE);
+    PetState back = staleCard ? ST_IDLE : lastValidState;
+    if (staleCard) msgBuf[0] = '\0';   // 旧审批文案不能挂到 IDLE 下面
     setState(back);
   }
 

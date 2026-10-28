@@ -65,13 +65,6 @@ import threading
 import time
 import uuid
 
-import argparse
-import asyncio
-import json
-import os
-import sys
-import uuid
-
 # ─────────────── 先解决编码问题（和 hook_client.py 同款）───────────────
 #
 # 中文 Windows 上 Python 默认按 GBK 写字，遇到 GBK 装不下的字符就抛
@@ -270,7 +263,7 @@ def discover_port():
 class SerialTransport:
     """真实串口传输层。pyserial 的细节全部关在这里，Bridge 只看到 connect / send。
 
-    和蓝牙相比，这里多了一个坑：串口是**独占**的（同一时刻只能一个程序拿着），
+    和 v2.0 的蓝牙相比，这里多了一个坑：串口是**独占**的（同一时刻只能一个程序拿着），
     而且**打开端口会让开发板复位**。所以「已连接」的定义不是「端口打开了」，
     而是「端口打开、并且等过了开发板启动的那几秒」。
     """
